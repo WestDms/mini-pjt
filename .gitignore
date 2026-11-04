@@ -9,3 +9,9 @@ chroma_db/
 *.jsonl
 eval_result.json
 .langgraph_api/
+
+# 실행 중 생성물
+data/chroma/
+traces/
+*.sqlite-shm
+*.sqlite-wal

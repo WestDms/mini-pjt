@@ -8,7 +8,7 @@ brownfield_context:
   existing_patterns: []
   existing_dependencies: []
 constraints:
-- Python, LangChain, LangGraph, Amazon Bedrock ChatBedrockConverse(us.anthropic.claude-sonnet-4-5-20250929-v1:0),
+- Python, LangChain, LangGraph, Amazon Bedrock ChatBedrockConverse(global.anthropic.claude-haiku-4-5-20251001-v1:0),
   langchain.agents.create_agent 사용. 임베딩은 Bedrock amazon.titan-embed-text-v2:0
 - '이미 존재하는 파일은 사용만 하고 수정·재생성하지 않는다: data/spots.csv(spot_id,name,region,area,types,default_type,species_season),
   data/forecast.csv(spot_id,date,wind_ms,wave_m,advisory,tide), data/criteria.json,
