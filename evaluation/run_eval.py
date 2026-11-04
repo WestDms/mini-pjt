@@ -188,7 +188,7 @@ def write_report(results: list[dict], path: Path, rnd: int, changes: str = "", p
         c[1] += 1
     L = [f"# {rnd}차 자체 평가 리포트", "", "## ① 실행 메타", "",
          f"- 실행 시각: {datetime.datetime.now().isoformat(timespec='seconds')}",
-         f"- 모델 ID: {os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-haiku-4-5-20251001-v1:0')}",
+         f"- 모델 ID: {os.getenv('BEDROCK_MODEL_ID', 'us.anthropic.claude-haiku-4-5-20251001-v1:0')}",
          f"- git 커밋: {commit}", "- EVAL_AUTO_APPROVE: true",
          f"- 명령: `python evaluation/run_eval.py --round {rnd}` (실제 Bedrock, 케이스당 1회, temperature=0)", "",
          "## ② 요약", "", f"- 통과: **{n_pass}/{len(results)}**"]

@@ -33,12 +33,12 @@ POST /query {question, thread_id?, user_id?}
 1. `.env.example`을 `.env`로 복사해 값을 채웁니다(AWS 자격증명 포함. 비밀은 코드에 적지 않음).
 2. 서버: `bash run.sh` (pip install → data/chroma 없으면 빌드 → `uvicorn src.agent:app --port 8000`)
 3. 호출: `curl -X POST localhost:8000/query -H "Content-Type: application/json" -d '{"question":"내일 지세포방파제 갈 수 있어?"}'`
-4. CLI 데모(사람 승인→재개): `python src/agent.py`
+4. 대화형 CLI(질문 입력 → 답변, 예약은 사람 승인): `python -m src.agent` (새 대화 `/new`, 종료 `종료`/`exit`). 고정 예약 데모는 `python -m src.agent --demo`
 5. 평가: `python evaluation/run_eval.py --round 1` 또는 `--round 2` (`evaluation/round<N>_report.md` 생성)
 6. Docker: `docker build -t fishing-agent .` → `docker run --env-file .env -p 8000:8000 fishing-agent`
 
 ## 5. RAGAS 결과
-`evaluation/run_eval.py`가 Bedrock(`global.anthropic.claude-haiku-4-5-20251001-v1:0`, Titan v2 임베딩)으로 RAGAS를 계산했습니다. 계산 대상은 contexts가 있는 건만이고, reference는 expected_traits입니다. RAGAS 점수는 보고용이며 통과 판정에는 쓰지 않습니다.
+`evaluation/run_eval.py`가 Bedrock(`us.anthropic.claude-haiku-4-5-20251001-v1:0`, Titan v2 임베딩)으로 RAGAS를 계산했습니다. 계산 대상은 contexts가 있는 건만이고, reference는 expected_traits입니다. RAGAS 점수는 보고용이며 통과 판정에는 쓰지 않습니다.
 
 | 지표 | 1차 (12건) | 2차 (13건) |
 |---|---|---|
@@ -74,7 +74,7 @@ Sonnet 4.5로 처음 시도했을 때는 Bedrock 일일 토큰 한도(`Throttlin
 | 입력 가드레일 / 불가 강행 감지 | `src/agent.py` `GuardrailClassification`, `build_guard_chain`, `is_unsafe_push` |
 | 트레이싱 | `src/agent.py` `write_trace` |
 | 에이전트 조립 | `src/agent.py` `FishingApp`, `async build_app()` |
-| FastAPI `/query`, CLI 데모 | `src/agent.py` `query_endpoint`, `_demo` |
+| FastAPI `/query`, CLI 데모·대화형 | `src/agent.py` `query_endpoint`, `_demo`, `_chat` |
 | 판정·추천·예약 도구 | `src/tools.py` `compute_verdict`, `recommend_spots`, `check_condition`, `book_boat` |
 | 하이브리드 검색·Chroma 빌드 | `src/retriever.py` `search`, `build_chroma` |
 | 평가·Judge·RAGAS | `evaluation/run_eval.py` |

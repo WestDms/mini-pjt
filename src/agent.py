@@ -1,7 +1,7 @@
 """agent.py - 출조 Agent: FastAPI(POST /query) + create_agent + 가드레일 + 미들웨어 + 마스킹 + 트레이싱 + CLI 데모
 
 제출 폴더 규약(§4)에 따라 API·가드레일·미들웨어·트레이싱·build_app·CLI 데모를 이 파일에 모두 둔다.
-실행: uvicorn src.agent:app --port 8000   /   python -m src.agent (CLI 데모, HITL 사람 승인 지원)
+실행: uvicorn src.agent:app --port 8000   /   python -m src.agent (대화형 CLI, HITL 사람 승인 지원)   /   python -m src.agent --demo (고정 예약 데모)
 """
 import asyncio
 import json
@@ -484,7 +484,7 @@ class BookingPrecheckMiddleware(AgentMiddleware):
 def make_llm() -> ChatBedrockConverse:
     """Bedrock Claude 모델을 만든다(temperature=0, read timeout 60초, 재시도 최대 2회)."""
     return ChatBedrockConverse(
-        model=os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-haiku-4-5-20251001-v1:0"),
+        model=os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0"),
         region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
         temperature=0,
         config=Config(read_timeout=60, retries={"max_attempts": 2, "mode": "standard"}),
@@ -564,7 +564,7 @@ async def query_endpoint(req: QueryRequest, request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
-# ---------------------------------------------------------------- CLI 데모 (사람 승인→재개는 여기서만)
+# ---------------------------------------------------------------- CLI 데모·대화형 (사람 승인→재개는 여기서만)
 async def _demo() -> None:
     """CLI 데모. EVAL_AUTO_APPROVE 와 무관하게 HITL ON 으로 데모 예약을 보내 interrupt 를 띄우고, stdin 한 줄로 1번만 재개한다."""
     os.environ["EVAL_AUTO_APPROVE"] = "false"  # 데모는 항상 HITL ON
@@ -575,26 +575,61 @@ async def _demo() -> None:
         print(f"질문> {q}")
         r = await fa.query(q, thread, user)
         print(r["answer"])
-        if any(t["step"] == "hitl_pending" for t in r["trace"]):
-            try:
-                line = input("승인하시겠습니까? (y/n)> ")
-            except EOFError:
-                line = ""
-            ok = line.strip().lower() in {"y", "yes", "승인"}  # 명시적 승인만 인정, 그 외는 거부
-            res = await fa.resume(thread, ok, user)
-            if ok:
-                nos = [m.group(1) for t in res["trace"] if t["step"] == "tool:book_boat"
-                       for m in [re.search(r'"reservation_no":\s*"([^"]+)"', t["output"])] if m]
-                print(res["answer"])
-                if nos and nos[0] not in res["answer"]:
-                    print(f"예약번호: {nos[0]}")
-            else:
-                print(BOOKING_CANCELLED)
+        await _cli_approve(fa, r, thread, user)
         config = {"configurable": {"thread_id": thread, "user_id": user}}
         print(f"[대기 interrupt 없음: {await fa._pending(config) is None}]")
     finally:
         await fa.aclose()
 
 
+async def _cli_approve(fa: FishingApp, r: dict, thread: str, user: str) -> None:
+    """응답이 HITL 대기면 사용자에게 승인 여부를 묻고 한 번 재개한다. y/yes/승인만 승인으로 본다."""
+    if not any(t["step"] == "hitl_pending" for t in r["trace"]):
+        return
+    try:
+        line = input("승인하시겠습니까? (y/n)> ")
+    except EOFError:
+        line = ""
+    ok = line.strip().lower() in {"y", "yes", "승인"}  # 명시적 승인만 인정, 그 외는 거부
+    res = await fa.resume(thread, ok, user)
+    if ok:
+        nos = [m.group(1) for t in res["trace"] if t["step"] == "tool:book_boat"
+               for m in [re.search(r'"reservation_no":\s*"([^"]+)"', t["output"])] if m]
+        print(res["answer"])
+        if nos and nos[0] not in res["answer"]:
+            print(f"예약번호: {nos[0]}")
+    else:
+        print(BOOKING_CANCELLED)
+
+
+async def _chat() -> None:
+    """대화형 CLI. 사용자 질문을 계속 받아 답하고, 예약 승인(HITL)은 그때마다 사람에게 묻는다.
+    같은 대화 안에서는 thread_id 를 유지해 앞 대화를 기억한다. '/new' 는 새 대화, '종료'·'exit'·'quit' 는 끝낸다."""
+    os.environ["EVAL_AUTO_APPROVE"] = "false"  # 대화형도 항상 사람 승인
+    fa = await build_app()
+    thread, user = uuid.uuid4().hex, "cli_user"
+    print("출조 Agent 대화형 모드입니다. 새 대화는 /new, 끝내려면 종료(exit)를 입력하세요.")
+    try:
+        while True:
+            try:
+                q = input("\n질문> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not q:
+                continue
+            if q.lower() in {"종료", "exit", "quit", "q"}:
+                break
+            if q == "/new":
+                thread = uuid.uuid4().hex
+                print("새 대화를 시작합니다.")
+                continue
+            r = await fa.query(q, thread, user)
+            print(r["answer"])
+            await _cli_approve(fa, r, thread, user)
+    finally:
+        await fa.aclose()
+
+
 if __name__ == "__main__":
-    asyncio.run(_demo())
+    asyncio.run(_demo() if "--demo" in sys.argv else _chat())

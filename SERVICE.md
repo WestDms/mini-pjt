@@ -32,7 +32,7 @@
   - `boats.csv`: 선박 정보
   - `regulations/*.md`: 가상 규정 문서 3~5건
   - 실시간 API나 실제 예약 사이트와는 연동하지 않는다.
-- **모델**: Amazon Bedrock Claude Haiku 4.5 (`global.anthropic.claude-haiku-4-5-20251001-v1:0`, ChatBedrockConverse)
+- **모델**: Amazon Bedrock Claude Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`, ChatBedrockConverse)
 
 ## 4. 서비스 정책 (가드레일 요약)
 1. 낚시와 상관없는 질문과 프롬프트 인젝션은 입력 단계에서 걸러 내고(LCEL + Pydantic 분류기) 정해진 문구로 거절한다.
