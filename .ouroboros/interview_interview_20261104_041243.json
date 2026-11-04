@@ -1,0 +1,136 @@
+{
+  "interview_id": "interview_20261104_041243",
+  "status": "in_progress",
+  "rounds": [
+    {
+      "round_number": 1,
+      "question": "Q1 주 사용자 / Q2 대표 질문 유형 / Q3 지역 범위 / Q4 날씨·물때 실시간 vs 스냅샷",
+      "user_response": "[from-user][refined]\nDecision: 주 사용자는 입문~중급 생활낚시인(방파제·갯바위·좌대)이고, 선상낚시 예약 기능을 추가한다. 처리할 질문 유형은 (1) 출조지 추천, (2) 출조 가능 판단(바람·파고·물때), (3) 규정 확인(금어기·포획금지체장)이다. 지역은 전국이다. 날씨·물때는 data/ 스냅샷만 쓴다.\n\nDetails:\n- 선상 예약: data/의 가상 낚싯배 목록에서 빈자리를 조회하고 가상으로 예약한다. 예약 도구는 실행 전에 사용자 승인(HITL)을 받는다. 결제는 하지 않는다.\n- 전국 데이터: 서해·남해·동해·제주 권역마다 대표 포인트 5~8곳, 전국 합계 약 25~30곳을 둔다. 규정 문서는 전국 공통으로 준비한다.\n\nConstraints (user-stated):\n- 예약은 반드시 사용자 승인을 받은 뒤에만 실행한다.\n- 외부 날씨·물때 API는 쓰지 않는다. 스냅샷만 쓴다.\n\nOut of scope (user-stated):\n- 준비물·채비 추천\n- 실제 예약 사이트 연동, 결제\n- 실시간 API",
+      "provenance": "user",
+      "timestamp": "2026-11-04T04:18:17.524697Z"
+    },
+    {
+      "round_number": 2,
+      "question": "Q5 출조 판정 기준 / Q6 가드레일 / Q7 에이전트 구조 / Q8 평가셋 구성·통과 정의",
+      "user_response": "[from-user]\nQ5: (a) data/에 고정 기준표를 두고(방파제·갯바위·선상별 풍속/파고/특보 기준, 가상값 허용) 도구가 가능/주의/불가를 결정적으로 판정한다.\nQ6: 가드레일 3개 채택 — (2) '불가' 판정 후 강행 요청 시 위험 경고·고정 비추천 답변, (3) 낚시 무관 질문 범위 밖 안내, (4) 예약자 이름·전화번호 로그/trace 마스킹. (1) 금어기·금지체장 미만 포획방법 고정 거절은 가드레일로 넣지 않는다(규정 확인 질문은 RAG로 정상 응답).\nQ7: (a) 단일 create_agent + 도구 4~5개 + HITL·ToolCallLimit·가드레일 미들웨어 (day5_final.py 패턴). Supervisor/MCP 과제 요건 없음.\nQ8: 배분 추천3/판단3/규정3/예약2/거절1 수용. 통과 = 판정값·핵심 키워드 일치 AND LLM Judge 4/5 이상. 기준일은 스냅샷 날짜로 고정.",
+      "provenance": "user",
+      "timestamp": "2026-11-04T04:25:01.573160Z"
+    },
+    {
+      "round_number": 3,
+      "question": "Q9 HITL 주고받기 / Q10 추천 순위 / Q11 규정 문서 / Q12 대화 기억",
+      "user_response": "[from-user][refined]\nDecision:\n- Q9: 평가·데모(/query) 모드에서는 예약 HITL을 자동 승인한다. 사람 승인 흐름(interrupt → 승인 → 재개)은 CLI 데모에서만 보여 준다. 기본 동작은 HITL ON이고, 환경변수 등의 평가 플래그로 자동 승인을 켠다.\n- 예약 평가 2건: 자동 승인 후 예약이 확정되어 예약번호가 나오면 통과다. (사용자가 처음에 '승인 요청에서 멈추면 통과'를 골랐다가, 자동 승인과 충돌한다는 설명을 듣고 '예약 확정 = 통과'로 정리했다.)\n- Q10: 추천 순위는 도구 안에서 결정적으로 정한다. 어종·시즌과 권역으로 거르고 → '불가'를 제외하고 → 가능을 주의보다 앞에 두어 상위 3곳을 고른다.\n- Q11: 규정 RAG는 가상 규정 문서를 쓰고, 답변에 '참고용(실제 법령 확인 필요)' 안내를 붙인다. 검색은 하이브리드(BM25+Chroma)다.\n- Q12: 단기 기억은 thread_id 체크포인터로 처리해 후속 질문(\"거기 내일 돼?\")에 답한다. 장기 기억은 Store에 선호 어종·지역·낚시 형태를 저장해 추천에 반영한다(day7 long_term_memory 패턴). 따라서 /query는 선택 필드 thread_id와 user_id를 받는다(필수 필드 question은 유지).",
+      "provenance": "user",
+      "timestamp": "2026-11-04T04:33:13.317097Z"
+    },
+    {
+      "round_number": 4,
+      "question": "Q13 스냅샷 범위·물때 / Q14 /query 서버 위치 / Q15 contexts·trace / Q16 기억 저장소",
+      "user_response": "[from-user]\nQ13: 스냅샷은 기준일 D0~D+2를 하루 단위로, 포인트당 하루 한 줄(풍속·파고·특보·물때)로 둔다. 물때도 판정에 반영한다. 예를 들어 사리처럼 물때가 강한 날은 갯바위 등에서 '주의'로 보정하며, 이 규칙은 기준표에 결정적으로 정의한다.\nQ14: FastAPI /query 앱은 src/agent.py 안에 둔다. 새 서버 파일은 만들지 않고, 사용자는 '역할 하나' 규칙과 충돌한다는 점을 알고 이를 받아들였다. fastapi·uvicorn은 requirements에 추가한다. CLI 데모(HITL interrupt → 승인 → 재개)도 agent.py의 __main__에 둔다.\nQ15: contexts에는 RAG 청크 원문과 도구 결과 JSON을 담는다. trace는 {step, tool, args, result_summary} 목록이며 예약자 PII를 마스킹하고, 가드레일이 발동하면 {guardrail: 범위밖|불가강행} 항목을 넣는다.\nQ16: 체크포인터와 Store를 모두 SQLite에 저장해 서버를 다시 시작해도 유지하고, DB 파일은 .gitignore에 넣는다.",
+      "provenance": "user",
+      "timestamp": "2026-11-04T04:37:20.831267Z"
+    },
+    {
+      "round_number": 5,
+      "question": "Q17 선호 저장 / Q18 가드레일 감지 / Q19 예약 입력·상태 / Q20 기준일·모델",
+      "user_response": "[from-user]\nQ17: (c) 별도 저장 도구는 두지 않는다. recommend_spots가 호출될 때 받은 어종·지역·낚시 형태를 Store(user_id 네임스페이스)에 덮어쓰고, 다음 추천에서 빠진 인자를 그 선호로 채운다. 도구는 5개(recommend_spots, check_condition, search_regulation, find_boats, book_boat)를 유지한다.\nQ18: 범위 밖 질문은 입력 단계에서 LLM이 분류한다(day7 guards_input 패턴). 불가 강행은 '대화 중 직전 check_condition 결과가 불가'이고 '강행 표현이 있음'일 때 결정적으로 감지하고, 고정 문구로 답한다(guards_refusal 패턴).\nQ19: 예약은 예약번호만 발급하는 단순 방식이다. 남은 자리는 줄이지 않고, 원본 데이터는 변경하지 않는다. 그래서 평가를 다시 돌려도 결과가 같다. 평가용 예약 질문에는 필요한 정보를 한 번에 모두 담는다.\nQ20: 기준일 D0는 2026-11-06(금)이고 D0~D+2(11-06~11-08)를 쓴다. 범위 밖 날짜는 고정 문구로 안내한다. 에이전트와 Judge는 모두 같은 모델(us.anthropic.claude-sonnet-4-5-20250929-v1:0, 실습 레포와 동일)을 쓰고, 모델 ID와 리전은 .env에서 읽는다.",
+      "provenance": "user",
+      "timestamp": "2026-11-04T04:43:15.785716Z"
+    },
+    {
+      "round_number": 6,
+      "question": "Q21 TODAY 기준 / Q22 data 구성 / Q23 예약 필드·실패 조건 / Q24 평가셋 스키마·기억 평가",
+      "user_response": "[from-user]\nQ21: TODAY=2026-11-06으로 고정한다(.env 또는 상수). 오늘은 D0, 내일은 D+1, 모레는 D+2이고, 날짜가 없으면 D0로 본다. 날짜 검증은 도구가 맡는다. 범위 밖 날짜는 고정 문구로 안내한다.\nQ22: data/ 구성은 추천안대로 확정한다. spots.csv, forecast.csv, criteria.json, boats.csv(spot_id 포함), regulations/*.md(가상 규정 3~5개), chroma/(.gitignore 대상).\nQ23: 필수 필드는 배ID·날짜·인원·이름·전화번호 5개다. 빠지면 되묻고 도구는 호출하지 않는다. 인원이 남은 자리보다 많거나, 해당 spot_id의 그날 선상 판정이 불가이면 예약을 거절한다. 그 외에는 예약번호만 발급하고 원본 데이터는 바꾸지 않는다.\nQ24: test_queries.csv 컬럼은 추천안대로(id, category, question, thread_id, user_id, expected_verdict, expected_keywords, expected_refusal) 둔다. 평가셋은 12건을 유지하고 성공 기준 10/12도 유지한다. 추천 3건 중 1건은 장기 기억(같은 user_id의 선호 반영), 판단 3건 중 1건은 2턴 후속 질문(같은 thread_id, 순서대로 실행)으로 넣는다. 리포트는 건별 CSV와 요약 md로 낸다. ToolCallLimit은 전체 8회, book_boat 1회로 수용한다.",
+      "provenance": "user",
+      "timestamp": "2026-11-04T04:48:16.756888Z"
+    },
+    {
+      "round_number": 7,
+      "question": "Q25 임베딩 / Q26 평가 판정 규칙 / Q27 참고용 안내 부착 / Q28 포인트 모호성",
+      "user_response": "[from-user] 전부 추천안. Q25 Bedrock Titan embed v2(.env, chroma 없으면 retriever.py가 빌드) / Q26 키워드 전부 일치(건당 1~3개), 거절 1건=범위 밖, 강행은 데모 / Q27 참고용 안내·고정 문구는 출력 가드레일 미들웨어에서 코드로 부착 / Q28 모호 시 후보 최대 3곳 되묻기, 없는 포인트는 고정 안내.",
+      "provenance": "user",
+      "timestamp": "2026-11-04T04:50:33.500697Z"
+    },
+    {
+      "round_number": 8,
+      "question": "Q29 가드레일 코드 위치 / Q30 평가 실행 코드 / Q31 가상 데이터 작성 / Q32 PII 마스킹",
+      "user_response": "[from-user] 전부 추천안. Q29 가드레일·미들웨어·트레이싱 전부 src/agent.py / Q30 evaluation/run_eval.py(실행+Judge, build_app 직접 호출, 자동승인, results.csv·report.md) / Q31 정적 데이터 직접 작성, 평가 질문 먼저 정하고 데이터 맞춤 / Q32 마스킹 홍*동·010-****-5678, trace·로그·contexts·answer 적용, 체크포인터는 원문 유지.",
+      "provenance": "user",
+      "timestamp": "2026-11-04T04:54:17.105127Z"
+    },
+    {
+      "round_number": 9,
+      "question": "Q33 오류 응답 / Q34 형태 기본값 / Q35 결과물 범위 / Q36 완료 확인",
+      "user_response": "[from-user] 전부 추천안. Q33 오류·한도초과 시 HTTP 200 + 고정 문구 + trace error, question 누락만 422 / Q34 형태 기본값 질문→장기기억 선호→default_type, 답변에 'OO 기준 판정' 명시 / Q35 SERVICE.md 1~3절 채움(4절 유지), .env.example 생성, requirements에 fastapi·uvicorn 추가, README·pytest 없음 / Q36 완료=실제 Bedrock run_eval 10/12 이상 + results.csv·report.md 생성 + uvicorn /query 1회(3키·PII 마스킹) + CLI HITL 시연 1회. Bedrock 호출 가능(.env 자격증명 있음).",
+      "provenance": "user",
+      "timestamp": "2026-11-04T04:57:24.881835Z"
+    },
+    {
+      "round_number": 10,
+      "question": "Restate gate 후속: 목표 문장 수정 - 강의 산출물 규약(§4)과 빌드 체크리스트(§5) 반영",
+      "user_response": "[from-user][refined]\nDecision: 목표를 수정한다. 강의 산출물 규약(§4)과 빌드 체크리스트(§5)를 지키고 충족해야 한다. 새 목표 문장: \"입문~중급 생활낚시인을 위한 출조 Agent(추천·판정·규정 RAG·가상 선상 예약 HITL)를 강의 산출물 규약(§4-1~4-5)과 필수 패턴(#1 LCEL+Pydantic, #3 RAG, #11 Trace, #12 평가)을 지켜 POST /query로 만들고, 인-아웃 세트 15건 중 13건 이상 통과한다.\"\n\nReasoning (사용자 원문): \"https://ucanlabs.kr/classroom/sds-ax/lesson/1141/ 에 명시된 산출물 규약을 지켜야하며 빌드 체크리스트도 충족시켜야해\" / \"README.md를 만드는 걸로 수정해줘\"\n\nConstraints (강의 규약, 사용자 제공 원문 기반):\n- 폴더: src/{agent,tools,retriever}.py, data/, evaluation/{test_queries.csv, round1_report.md(1차), round2_report.md(개선 후 2차)}, SERVICE.md, requirements.txt, README.md(필수), Dockerfile, run.sh. 이전 결정 중 results.csv·report.md는 폐기한다.\n- API: POST /query {\"question\"} → {\"answer\", \"contexts\":[{doc_id,text}], \"trace\":[{step,input,output}]}. thread_id·user_id는 선택 필드로 유지한다. 이전 결정의 trace 형식 {step,tool,args,result_summary}는 폐기한다(마스킹과 guardrail 정보는 step/input/output 안에 담는다).\n- SERVICE.md는 5개 절 템플릿을 따른다: 1 사용자·문제·가치(대안 포함) / 2 서비스 확장(수익 모델: 선상 예약 중개 수수료, 규모, 차별점) / 3 도구·데이터(실제/가짜 여부) / 4 가드레일 규칙 3~5건 / 5 성공 기준(15건 중 13건, 85%, 쓸만함 지표).\n- test_queries.csv 컬럼: id, category(positive/negative/edge/guardrail), input, expected_traits, forbidden, expected_tools, note. 필드 안 구분자는 ';'이다. 15건 배분: positive 6(추천2·판정2·규정1·예약1), negative 3(없는 포인트·범위 밖 날짜·규정에 없는 어종), edge 4(장기기억·2턴 후속·모호한 포인트·좌석초과 또는 불가일 예약), guardrail 2(범위 밖 질문·프롬프트 인젝션). 이전의 자체 컬럼과 12건 배분은 폐기한다.\n- 가드레일에 프롬프트 인젝션 방어를 추가한다(입력 분류기가 함께 판정).\n- 필수 패턴: #1 입력 가드레일 분류기를 LCEL(prompt | llm.with_structured_output(Pydantic))로 만든다. #3 하이브리드 RAG. #11 LangSmith 트레이스(LANGSMITH_API_KEY가 없으면 로컬 JSONL 트레이서). #12 RAGAS 4지표(context_recall/precision, faithfulness, answer_relevancy, Bedrock 사용)와 LLM Judge를 run_eval.py에서 계산한다.\n- requirements에 fastapi, uvicorn, ragas, langsmith를 추가한다.\n- README.md를 만든다(§4-5 템플릿: 활용 패턴, 아키텍처, 실행 방법, RAGAS 결과, 1·2차 통과율, 회고, 핵심 코드 위치). 이전의 'README 만들지 않음' 결정은 취소한다.\n- 체크리스트 커버리지: #1,2,3,4,6,7,8,10,11,12 (10개 ≥ 권장 6개).\n\nOut of scope: MCP 서버(#5), Supervisor(#9), Plan-Execute.",
+      "provenance": "user",
+      "timestamp": "2026-11-04T05:11:53.621251Z"
+    },
+    {
+      "round_number": 11,
+      "question": "Q37 통과 판정 / Q38 RAGAS reference / Q39 다턴 케이스 표현 / Q40 라운드·완료 정의·Docker",
+      "user_response": "[from-user] 전부 추천안. Q37 통과=expected_tools⊆실제 도구 AND forbidden 미포함 AND Judge가 expected_traits 전부 충족(guardrail은 trace의 guardrail step 확인) / Q38 RAGAS reference=expected_traits, contexts 있는 건만, 보고용 / Q39 note에 thread=..;user=..;setup=.. 파싱해 setup 선행, 마지막 응답만 채점 / Q40 1차 그대로→round1, 개선 후→round2, 13/15는 2차만 적용. 완료=2차 13/15 + 리포트 2개 + README·SERVICE 완성 + /query 1회 + CLI HITL 1회 + run.sh 동작 + docker build 성공(Docker 사용 가능). 기본값(doc_id, trace step, 인젝션 전용 거절 문구, edge 예약=좌석초과) 수용.",
+      "provenance": "user",
+      "timestamp": "2026-11-04T05:15:31.201341Z"
+    },
+    {
+      "round_number": 12,
+      "question": "# 인터뷰 마무리: 최종 요구사항 정리\n\nQ37~Q40까지 모두 추천안으로 정해졌습니다. 아래는 지금까지 결정을 합친 최종본입니다. 아직 확정하지 않은 세부 사항 4가지는 맨 아래에 기본값으로 적었습니다.\n\n## 목표\n입문~중급 생활낚시인을 위한 출조 Agent를 만듭니다. 기능은 추천, 출조 판정, 규정 RAG, 가상 선상 예약(HITL)입니다. 강의 산출물 규약 §4-1~4-5와 필수 패턴(#1, #3, #11, #12)을 지키고 POST /query로 제공합니다. 2차 평가에서 15건 중 13건 이상 통과해야 합니다.\n\n## 핵심 결정\n| 영역 | 결정 |\n|---|---|\n| 구조 | `create_agent` 하나와 도구 5개(recommend_spots, check_condition, search_regulation, find_boats, book_boat)로 구성합니다. 미들웨어는 HITL, ToolCallLimit(전체 8회, book_boat 1회), 가드레일입니다. MCP, Supervisor, Plan-Execute는 넣지 않습니다. |\n| 데이터 | 기준일은 2026-11-06이고 D0~D+2만 다룹니다. 권역 4곳에 포인트 25~30곳을 둡니다. 파일은 spots·forecast·boats CSV, criteria.json, 가상 규정 md 3~5개입니다. |\n| 판정 | 기준표에 따라 낚시 형태별로 가능/주의/불가를 결정적으로 판정합니다. 사리 같은 물때 보정도 포함합니다. 형태는 질문 → 장기 기억 → 기본값 순서로 정합니다. |\n| RAG | BM25와 Chroma(Titan v2)를 합친 하이브리드 검색입니다. 답변에는 출력 가드레일이 '참고용' 안내를 코드로 붙입니다. |\n| 기억 | 체크포인터(thread_id)와 Store(user_id)를 둘 다 SQLite에 저장합니다. 선호 정보는 recommend_spots가 호출될 때 덮어씁니다. |\n| 가드레일 | 입력 분류기(LCEL + Pydantic)가 범위 밖 질문과 프롬프트 인젝션을 막습니다. 불가 판정 후 강행하려 하면 결정적으로 감지해 고정 문구로 답합니다. 개인정보는 `홍*동` / `010-****-5678` 형태로 마스킹합니다. 체크포인터 안의 원문은 마스킹하지 않습니다. |\n| API | `{question, thread_id?, user_id?}`를 받아 `{answer, contexts[{doc_id,text}], trace[{step,input,output}]}`를 돌려줍니다. 오류는 200과 고정 문구로 응답하고, question이 없을 때만 422를 냅니다. |\n| HITL | 기본값은 ON이고, 평가 플래그를 켜면 자동 승인합니다. 사람 승인 흐름은 `agent.py __main__`의 CLI에서 시연합니다. |\n| 평가 | 평가셋은 15건(positive 6, negative 3, edge 4, guardrail 2)입니다. 통과 조건은 세 가지입니다. 기대 도구가 실제 호출 도구에 모두 포함되고, 금지 표현이 없고, Judge가 기대 특성을 전부 충족했다고 판정해야 합니다. RAGAS 4지표는 보고용입니다. 1차 결과는 round1, 2차 결과는 round2 리포트에 넣습니다. |\n| 산출물 | src 3파일, data, evaluation(csv와 리포트 2개), SERVICE.md(5개 절), README.md, Dockerfile, run.sh, .env.example, requirements 추가분입니다. |\n\n## 완료 정의\n1. 실제 Bedrock으로 돌린 2차 평가가 13/15 이상이고, round1·round2 리포트가 있습니다.\n2. README와 SERVICE.md가 완성되어 있습니다.\n3. `/query`를 1회 호출해 3개 키가 오고 개인정보가 마스킹된 것을 확인합니다.\n4. CLI에서 HITL 흐름(interrupt → 승인 → 재개)을 1회 시연합니다.\n5. `run.sh`가 동작하고 `docker build`가 성공합니다.\n\n## 아직 정하지 않은 4가지 (기본값 제안)\n- **Q41. 1·2차 평가의 공정성:** 1차와 2차 사이에 `test_queries.csv`(질문, 기대 특성, 금지 표현)는 바꾸지 않습니다. 개선은 프롬프트, 도구 로직, 데이터, 가드레일에서만 하고, 바꾼 내용은 round2 리포트와 README 회고에 적습니다.\n- **Q42. run.sh:** 의존성 설치 → (Chroma가 없으면 빌드) → `uvicorn src.agent:app --port 8000` 순서로 실행합니다. Windows에서는 Git Bash로 돌립니다.\n- **Q43. Docker:** 베이스 이미지는 `python:3.11-slim`, 포트는 8000입니다. 비밀 값은 `--env-file .env`로 넘기고 이미지에 넣지 않습니다. SQLite와 Chroma는 컨테이너 안에서 만듭니다.\n- **Q44. RAGAS 실패 처리:** Bedrock에서 지표 하나가 계산되지 않으면 그 값은 N/A로 기록하고 이유를 남깁니다. 통과율 판정은 막지 않습니다. 단, 4개 지표 중 하나라도 수치가 나와야 #12를 충족한 것으로 봅니다.\n\n**질문:** Q41~Q44를 기본값대로 받아들이시면 인터뷰를 마치고 이 내용을 Seed(실행 가능한 명세와 수용 기준)로 고정하겠습니다. 바꾸고 싶은 항목이 있으면 번호와 함께 알려 주세요.",
+      "user_response": null,
+      "provenance": "user",
+      "timestamp": "2026-11-04T05:16:50.252381Z"
+    }
+  ],
+  "initial_context": "낚시 출조하는 사람을 위한 Agent 개발 (삼성SDS AX 교육 미니프로젝트). 구체 아이디어는 아직 없고 인터뷰로 구체화하며 SERVICE.md(템플릿: 1.사용자·문제·가치 / 2.사용 예상 도구·데이터 / 3.서비스 정책(가드레일) / 4.성공 기준: 인-아웃 세트 12건 중 10건 이상 통과)를 채운다. 현재 SERVICE.md 제목은 '낚시 출조지 추천 Agent'. 기술 제약: Python, LangChain/LangGraph, Amazon Bedrock(ChatBedrockConverse), langchain.agents.create_agent 사용. 제출 규약 폴더: src/agent.py(그래프), src/tools.py(도메인 도구), src/retriever.py(RAG), data/, evaluation/test_queries.csv. API: POST /query {question} -> {answer, contexts, trace}. 교육 실습 레포의 패턴(Supervisor+RAG+MCP, 미들웨어 HITL/ToolCallLimit/가드레일, 하이브리드 검색 BM25+벡터, Chroma, JSONL 트레이싱, LLM Judge 평가)을 재사용.",
+  "created_at": "2026-11-04T04:12:43.419561Z",
+  "updated_at": "2026-11-04T05:26:08.778107Z",
+  "is_brownfield": true,
+  "codebase_paths": [
+    {
+      "path": "C:\\Users\\SDS\\Desktop\\mini-pjt",
+      "role": "primary"
+    }
+  ],
+  "codebase_context": "",
+  "explore_completed": false,
+  "ambiguity_score": 0.21,
+  "ambiguity_breakdown": {
+    "goal_clarity": {
+      "name": "Goal Clarity",
+      "clarity_score": 0.95,
+      "weight": 0.35,
+      "justification": "The goal is stated in one sentence that can be tested. It names the user (entry-level to intermediate recreational anglers), the four capabilities (spot recommendation, go/no-go judgment, regulation RAG, mock boat booking with HITL), the interface (POST /query) and the target (2nd round, at least 13 of 15). The restate gate updated it for the course rules: the 12-case/10-pass target became 15/13, the README decision was reversed, and the old trace and CSV formats were dropped. The conversation says outright which earlier decisions no longer apply, so old and new goals don't conflict. Scope exclusions are also explicit: MCP, Supervisor, Plan-Execute, tackle recommendations, live APIs and payment. Small deductions: SERVICE.md §2 asks for business-expansion text (revenue model, scale, differentiation), but nobody has said how much or how detailed it should be. Its 'usefulness metric' in §5 is also undefined."
+    },
+    "constraint_clarity": {
+      "name": "Constraint Clarity",
+      "clarity_score": 0.9,
+      "weight": 0.25,
+      "justification": "Constraints are very specific. Stack: create_agent with ChatBedrockConverse, a fixed model ID read from .env, and Titan v2 embeddings. Folder and API rules come from the course. The five tool names are fixed. ToolCallLimit is 8 calls in total and 1 for book_boat. The reference date is fixed at 2026-11-06 with a D0–D+2 window. The data files are listed. PII masking format and scope are set: answer, trace, contexts and logs are masked, but the checkpointer keeps the original. Errors return 200, and only a missing question returns 422. Known conflicts were resolved explicitly: putting server, guardrails and tracing in agent.py breaks the 'one role per file' rule, and the user accepted that. README, Dockerfile, run.sh and .env.example override the 'no unrequested files' rule because the user asked for them. Remaining gaps: (1) Q41–Q44 (round fairness, run.sh, Docker, RAGAS failure handling) are still only proposed defaults, not user decisions. (2) The step names inside trace[{step,input,output}] and how guardrail and masking info is represented there were accepted as defaults but never specified. (3) The forced-trip guardrail detects 'forcing expressions', but no keyword list or rule is given, so 'deterministic' is not fully defined. (4) The criteria.json thresholds and tide adjustment rules are only 'mock values allowed', so their contents are left to the implementer. (5) LLM Judge temperature and how often to repeat runs are not stated."
+    },
+    "success_criteria_clarity": {
+      "name": "Success Criteria Clarity",
+      "clarity_score": 0.88,
+      "weight": 0.25,
+      "justification": "The definition of done is five items that can each be checked: 2nd-round Bedrock evaluation at least 13/15 plus both reports, README and SERVICE.md complete, one /query call returning 3 keys with masking, one CLI HITL demo, and run.sh working with docker build succeeding. Per-case pass is an AND of three conditions: expected_tools is a subset of the tools actually called, no forbidden expressions appear, and the Judge finds every expected_trait satisfied. Guardrail cases are checked through the trace step. The breakdown of the 15 cases and how multi-turn cases are run (note parsing, setup runs first, only the last turn is scored) are also defined. Deductions: (1) Pass/fail still depends on an LLM Judge for expected_traits, which are written in free text, so results may not reproduce between runs. No Judge prompt, scale or temperature is fixed. (2) RAGAS uses expected_traits as its reference. Those are traits, not ground-truth answers, so context_recall may mean little. It is report-only, but the criterion that one numeric metric satisfies #12 is weak. (3) 'README and SERVICE.md complete' has no checklist for what complete means. (4) If Q41 is not adopted, round 1 and round 2 may not be compared fairly."
+    },
+    "context_clarity": {
+      "name": "Context Clarity",
+      "clarity_score": 0.9,
+      "weight": 0.15,
+      "justification": "This is a nearly empty repo that will reuse existing patterns. For each feature the conversation names the reference file in the practice repo: day5_final for create_agent and middleware, guards_input/refusal, long_term_memory, local_tracer, run_eval/llm_judge, hybrid and build_chroma. That makes the reuse path clear. CLAUDE.md conventions (Korean docstrings, secrets in .env, edit only changed parts) also apply. Deductions: the practice code was built around a Supervisor, MCP and async build_app. Nobody has said how much of it to strip out to adapt it to a single-agent setup, or whether build_app stays async. The course page (lesson/1141) was taken from text the user supplied, so §4-1~4-5 may not have been checked against the original."
+    }
+  },
+  "completion_candidate_streak": 0,
+  "lateral_review_advised_milestones": [],
+  "reference_cues": [],
+  "reference_resolutions": [],
+  "pending_confused_terms": [],
+  "requirement_input_revision": 11,
+  "requirement_distillation": null
+}

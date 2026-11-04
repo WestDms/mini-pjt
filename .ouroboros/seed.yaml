@@ -1,0 +1,179 @@
+goal: '입문~중급 생활낚시인을 위한 출조 Agent를 만든다. 기능은 출조지 추천, 출조 가능 판정, 규정 RAG, 가상 선상 예약(HITL)이다.
+  강의 산출물 규약(§4)과 필수 패턴(#1, #3, #11, #12)을 지켜 POST /query로 제공하고, 2차 자체 평가에서 15건 중 13건
+  이상 통과한다.'
+task_type: code
+brownfield_context:
+  project_type: brownfield
+  context_references: []
+  existing_patterns: []
+  existing_dependencies: []
+constraints:
+- Python, LangChain, LangGraph, Amazon Bedrock ChatBedrockConverse(us.anthropic.claude-sonnet-4-5-20250929-v1:0),
+  langchain.agents.create_agent 사용. 임베딩은 Bedrock amazon.titan-embed-text-v2:0
+- '이미 존재하는 파일은 사용만 하고 수정·재생성하지 않는다: data/spots.csv(spot_id,name,region,area,types,default_type,species_season),
+  data/forecast.csv(spot_id,date,wind_ms,wave_m,advisory,tide), data/criteria.json,
+  data/boats.csv(boat_id,boat_name,port,spot_id,date,species,capacity,seats_left,price),
+  data/regulations/01~04 *.md, evaluation/test_queries.csv, SERVICE.md(완성본), CLAUDE.md,
+  .gitignore는 항목 추가만 허용'
+- 'sha256 기준값: boats.csv 31a846ec5042226066d14ed33dd07e2afc52368dd6b6778529587b58a3603754
+  / forecast.csv a356659403887fb1d4e34f5976de46ed90ff2002eff9d9cfa5448cd6da4541c6
+  / spots.csv 038b02aab980769726464a1283b13155b9c157c6f610a66abb471ceb3d7d2078 / criteria.json
+  dc885034be4139cd101d20788b3908e2d193fd7d94d891fb2a8cae75af9341f8 / 01_금어기.md b3bc4bfa7ebe9d6ce82d86bf137acb3a9904eb0cddb501f8ac29068f5ab535f0
+  / 02_포획금지체장.md 81e3dc7edb38896e6d1822d80421dd906f25b267979d4def3ae1eda48fce618d
+  / 03_낚시안전수칙.md 4c9bd801f75cf6a76167e77d020891fe03f6ec3baaa7d3f185cdd1886a2b1d24
+  / 04_지역특례.md a31025ff18dbffbae6dc9077071412654a51d145dccdd7806cd94c0f8e85caa6 /
+  test_queries.csv fd106f9ead656d960869a94dbf556c28ee1deef004718abb15a02333ec85470d'
+- 새로 만드는 파일은 src/agent.py, src/tools.py, src/retriever.py, evaluation/run_eval.py,
+  evaluation/round1_report.md, evaluation/round2_report.md, README.md, Dockerfile,
+  run.sh, .env.example뿐이다. 실행 중 생기는 data/chroma/, *.sqlite, traces/*.jsonl은 허용하고 .gitignore에
+  추가한다. .ouroboros/는 건드리지 않는다
+- requirements.txt에는 기존 항목을 유지한 채 fastapi, uvicorn, ragas, langsmith만 추가한다
+- '비밀 값은 .env에서 읽고 코드에 적지 않는다. .env.example 변수: AWS_DEFAULT_REGION, BEDROCK_MODEL_ID,
+  EMBEDDING_MODEL_ID, TODAY=2026-11-06, EVAL_AUTO_APPROVE, LANGSMITH_API_KEY, LANGSMITH_PROJECT.
+  현재 .env에는 AWS 자격증명과 리전만 있다'
+- 함수와 도구에는 한국어 docstring을 쓴다
+- TODAY=2026-11-06 고정, 오늘=D0·내일=D+1·모레=D+2, 날짜 없으면 D0. 2026-11-06~08 밖의 날짜는 도구가 거부하고
+  고정 문구로 안내한다
+- 1차와 2차 평가 사이에 test_queries.csv는 수정하지 않는다. 개선은 프롬프트·도구 로직·가드레일에서만 하고 변경 내용을 round2_report.md에
+  적는다
+- 실시간 API, 실제 예약 사이트, 결제, MCP 서버, Supervisor, Plan-Execute는 만들지 않는다
+- 단일 create_agent에 도구 5개(recommend_spots, check_condition, search_regulation, find_boats,
+  book_boat)를 붙이고 미들웨어로 HITL(book_boat), ToolCallLimit(전체 8, book_boat 1), 가드레일, 마스킹을
+  건다. 실습 레포 day5_final.py·guards*.py 패턴을 따른다
+- FastAPI 앱·가드레일·미들웨어·트레이싱·`async build_app()`·CLI 데모(__main__)는 모두 src/agent.py에
+  둔다. 사용자가 CLAUDE.md의 '파일 하나에 역할 하나' 규칙보다 제출 폴더 규약을 우선하기로 결정했다
+- 'check_condition: criteria.json thresholds로 풍속·파고가 모두 가능 상한 이하면 가능, 모두 주의 상한 이하면
+  주의, 그 외 불가. advisory_rules 단계가 더 나쁘면 그 단계. 사리는 갯바위·선상의 가능→주의. 낚시 형태는 질문→Store 선호→default_type
+  순이며 답변에 ''OO 기준 판정''을 쓴다. 포인트명이 모호하면 후보 최대 3곳을 돌려주고 되묻고, 없는 포인트는 고정 문구'
+- 'recommend_spots: 어종·시즌(species_season)·권역·형태 필터 → 불가 제외 → 가능>주의, 동률이면 spot_id 순으로
+  상위 3곳. 받은 어종·권역·형태를 Store(user_id)에 덮어쓰고 빠진 인자는 Store에서 채운다'
+- 'search_regulation: data/regulations를 BM25+Chroma 하이브리드로 검색(day2 hybrid.py 패턴),
+  data/chroma/가 없으면 retriever.py가 빌드. 문서에 없는 어종은 찾을 수 없다고 답한다'
+- 'book_boat: 배ID·날짜·인원·이름·전화번호 필수(누락 시 도구 호출 없이 되묻기), 인원>seats_left 또는 해당 spot_id·날짜
+  선상 판정 불가이면 거절, 그 외에는 예약번호만 발급하고 데이터는 바꾸지 않는다. HITL 기본 ON, EVAL_AUTO_APPROVE=true면
+  자동 승인'
+- 입력 가드레일은 LCEL(prompt | llm.with_structured_output(Pydantic))로 정상/범위밖/인젝션을 분류하고 범위밖·인젝션은
+  서로 다른 고정 문구로 거절한다. 불가 강행은 같은 thread의 직전 check_condition 결과가 불가이고 강행 표현이 있을 때 결정적으로
+  감지한다. 출력 가드레일은 search_regulation이 호출된 턴에 '참고용(실제 법령 확인 필요)'를 코드로 붙인다
+- 마스킹은 이름 홍*동(2자는 홍*), 전화 010-****-5678 형식으로 answer·contexts·trace·로그에 적용한다. SQLite
+  체크포인터에는 대화 재개를 위해 원문을 남긴다
+- 체크포인터(thread_id)와 Store(user_id)는 모두 SQLite. /query 요청 본문은 question(필수)과 선택 필드 thread_id,
+  user_id
+- contexts의 doc_id는 RAG 청크면 regulations/<파일명>#<청크번호>, 도구 결과면 tool:<도구명>. trace의 step은
+  guardrail_input, tool:<도구명>, guardrail_output, final, error 중 하나이고 input·output은
+  마스킹된 문자열
+- run_eval.py는 build_app()을 직접 호출하고 EVAL_AUTO_APPROVE=true로 실행한다. 통과=expected_tools가
+  실제 호출 도구에 포함 AND forbidden 위반 없음 AND LLM Judge가 expected_traits 전부 충족. forbidden
+  중 '[판단]'으로 시작하는 항목은 LLM Judge가, 나머지는 answer·contexts·trace 문자열 포함 여부로 검사. guardrail
+  건은 trace의 guardrail_input step도 확인
+- 'note 칸 다턴 표기: thread=<id>, user=<id>, setup=<선행 질문>, setup_thread=<id>. setup_thread가
+  있으면 setup을 그 thread에서 먼저 실행하고(장기기억 검증), 없으면 같은 thread에서 실행(단기기억 검증). ''/'' 뒤는 설명이다.
+  마지막 input의 응답만 채점한다'
+- RAGAS 4지표(context_recall, context_precision, faithfulness, answer_relevancy)는 Bedrock으로
+  계산하고 expected_traits를 reference로 쓰며 contexts가 있는 건만 대상이다. 계산 실패 지표는 N/A와 사유를 기록하고
+  통과 판정에는 쓰지 않는다
+- run.sh는 pip install -r requirements.txt → data/chroma/ 없으면 빌드 → uvicorn src.agent:app
+  --port 8000. Dockerfile은 python:3.11-slim, 8000 포트, 비밀은 --env-file로 주입
+acceptance_criteria:
+- description: 실제 Bedrock으로 `python evaluation/run_eval.py`를 실행한 2차 결과 evaluation/round2_report.md에
+    15건 중 13건 이상 통과, 건별 통과/실패 사유, RAGAS 4개 지표 중 최소 1개의 수치가 기록되고, 같은 형식의 evaluation/round1_report.md도
+    존재한다
+  semantic_ac_key: ac_d8f418cc14a7b94c
+- description: 구현이 끝난 뒤 data/spots.csv, data/forecast.csv, data/criteria.json, data/boats.csv,
+    data/regulations/*.md, evaluation/test_queries.csv의 sha256이 constraints에 적힌 기준값과
+    같다
+  semantic_ac_key: ac_9d2ff28244538542
+- description: '`bash run.sh`로 서버를 띄운 뒤 POST /query {"question": ...}를 보내면 answer,
+    contexts([{doc_id,text}]), trace([{step,input,output}]) 세 키가 돌아오고, question이 없으면
+    422를 반환한다'
+  semantic_ac_key: ac_3f46072492525a98
+- description: '예약 요청(예: ''11월 7일 B03 2명 예약, 홍길동 010-1234-5678'')의 answer·contexts·trace와
+    로컬 트레이스 파일에 ''홍길동''과 ''010-1234-5678'' 원문이 없고 홍*동, 010-****-5678로 표시된다'
+  semantic_ac_key: ac_1f9277d2d59bcb5a
+- description: '`printf ''y\n'' | python src/agent.py`를 실행하면 데모 예약 요청이 book_boat 승인
+    대기(interrupt) 문구를 출력한 뒤 승인되어 예약번호를 출력하고, `printf ''n\n'' | python src/agent.py`에서는
+    예약번호 없이 취소 문구를 출력한다'
+  semantic_ac_key: ac_332d18e3f3cc4632
+- description: '낚시와 무관한 질문과 프롬프트 인젝션은 trace에 guardrail_input step이 남고 각각의 고정 거절 문구로
+    응답하며, 같은 thread에서 불가 판정(예: 내일 오천항 선상) 직후 ''그래도 갈래''라고 하면 고정 비추천 문구로 응답한다'
+  semantic_ac_key: ac_66f1b4fdbf84e4c8
+- description: '''11월 7일 B01 2명 예약'' 요청은 해당 날짜 선상 판정이 불가라는 이유로 거절되고 예약번호가 발급되지 않는다'
+  semantic_ac_key: ac_7bf7623bd3d12aa2
+- description: 도구 호출 한도(전체 8회, book_boat 1회)를 넘거나 도구·모델 예외가 나면 /query는 HTTP 200으로
+    고정 오류 문구를 돌려주고 trace에 step=error 항목이 남는다
+  semantic_ac_key: ac_954fd3fadfc03001
+- description: 규정 질문 응답에 '참고용(실제 법령 확인 필요)' 안내가 붙고 contexts에 doc_id가 regulations/로
+    시작하는 청크가 포함된다
+  semantic_ac_key: ac_eb9a684c65ba3806
+- description: '요청마다 트레이스가 남는다: LANGSMITH_API_KEY가 있으면 LangSmith 프로젝트에, 없으면 로컬 JSONL
+    파일에 요청별 레코드가 추가된다'
+  semantic_ac_key: ac_e1d161dfd3cbcabc
+- description: README.md가 §4-5 템플릿의 모든 절(무엇을 푸나, 활용 패턴, 아키텍처, 실행 방법, RAGAS 결과, 1·2차
+    통과율, 회고, 핵심 코드 위치)을 실제 값으로 채운다
+  semantic_ac_key: ac_82422538d9c304ab
+- description: '`docker build`가 성공하고, `docker run --env-file .env -p 8000:8000` 컨테이너가
+    POST /query에 응답한다'
+  semantic_ac_key: ac_8ef6d5ba0b858e25
+ontology_schema:
+  name: FishingTripAgentDomain
+  description: 출조 Agent가 다루는 엔티티. data/ 파일 컬럼과 /query 인터페이스를 그대로 옮겼다(생성 후 수동 보완).
+  fields:
+  - name: Spot
+    field_type: record
+    description: 'data/spots.csv 한 행. spot_id(W01~J07), name, region(서해|남해|동해|제주), area, types(;구분:
+      방파제|갯바위|선상|좌대), default_type, species_season(어종:시작월-끝월 ;구분)'
+  - name: Forecast
+    field_type: record
+    description: 'data/forecast.csv 한 행. spot_id→Spot, date(2026-11-06~08), wind_ms, wave_m, advisory(없음|풍랑주의보|풍랑경보|태풍경보),
+      tide(조금|중물|사리)'
+  - name: Criteria
+    field_type: record
+    description: 'data/criteria.json. thresholds[형태][가능|주의]{wind_max,wave_max}, advisory_rules[특보][형태]→단계,
+      tide_rules.사리{apply_to,downgrade}'
+  - name: Verdict
+    field_type: enum
+    description: 가능 | 주의 | 불가. (Spot, date, 형태)에 대해 Criteria로 결정적으로 산출
+  - name: Boat
+    field_type: record
+    description: 'data/boats.csv 한 행(boat_id+date 고유). boat_id(B01~B10), boat_name, port, spot_id→Spot,
+      date, species, capacity, seats_left, price'
+  - name: Reservation
+    field_type: record
+    description: book_boat 입력 boat_id, date, people, name, phone과 출력 reservation_no. 저장하지 않으며 응답·로그에서
+      name·phone은 마스킹
+  - name: RegulationChunk
+    field_type: record
+    description: data/regulations/*.md 청크. doc_id=regulations/<파일명>#<청크번호>, text
+  - name: UserPreference
+    field_type: record
+    description: Store(namespace=user_id)에 저장되는 species, region, fishing_type
+  - name: QueryRequest
+    field_type: record
+    description: POST /query 본문. question(필수), thread_id(선택), user_id(선택)
+  - name: QueryResponse
+    field_type: record
+    description: answer(str), contexts([{doc_id, text}]), trace([{step, input, output}]).
+      step ∈ guardrail_input | tool:<도구명> | guardrail_output | final | error
+  - name: TestQuery
+    field_type: record
+    description: evaluation/test_queries.csv 한 행. id, category(positive|negative|edge|guardrail),
+      input, expected_traits, forbidden('[판단]' 접두사는 Judge 판정), expected_tools, note(thread/user/setup/setup_thread)
+evaluation_principles:
+- name: settled_requirements
+  description: Evaluate only the session-settled requirements.
+  weight: 1.0
+exit_conditions:
+- name: settled_requirements_met
+  description: All session-settled requirements are satisfied.
+  criteria: Every listed acceptance criterion passes.
+metadata:
+  seed_id: seed_80a8b4a801d6
+  version: 1.0.0
+  created_at: '2026-11-04T05:57:09.791016Z'
+  ambiguity_score: 0.2
+  interview_id: session-context
+  parent_seed_id: seed_3faa63338720
+  generation_mode: normal
+  degraded: false
+  unresolved_slots: []
+  recovery_reason: null

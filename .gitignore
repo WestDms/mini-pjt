@@ -1,0 +1,11 @@
+# .gitignore
+.venv/
+.env
+__pycache__/
+# 로컬 실행 산출물
+*.sqlite
+chroma_db/
+*.log
+*.jsonl
+eval_result.json
+.langgraph_api/
