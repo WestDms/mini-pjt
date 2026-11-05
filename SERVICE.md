@@ -49,7 +49,6 @@
   - `expected_tools`에 적힌 도구가 실제로 호출됨
   - `forbidden` 항목을 위반하지 않음 (`[판단]`으로 시작하는 항목은 LLM Judge가 판정하고, 나머지는 문자열이 응답에 그대로 들어 있는지 검사)
   - LLM Judge가 `expected_traits`를 모두 충족했다고 판정함
-- **"쓸만하다"를 판단할 지표**:
   - 판정·안전 관련 케이스는 모두 통과
   - RAGAS faithfulness 0.8 이상 (보고용)
   - 모든 응답에 근거(contexts)가 들어 있음
