@@ -11,9 +11,10 @@ from langgraph.types import Command
 
 from src.constants import (BOOKING_CANCELLED, ERROR_FIXED, HITL_PENDING, REFUSAL_INJECTION, REFUSAL_OUT_OF_SCOPE,
                            REGULATION_DISCLAIMER, TIMEOUT_SEC, UNSAFE_PUSH)
-from src.guardrails import is_unsafe_push
+from src.guardrails import is_unsafe_push, rule_classify
 from src.masking import PII_NAMES, mask_text, register_names
 from src.middleware import error_code
+from src.output_guard import RETRY_MESSAGE, enforce_fixed_phrases, needs_tool_retry, unsupported_spots
 from src.tracing import write_trace
 from src.utils import env_true, get_text
 
@@ -83,8 +84,11 @@ class FishingApp:
             trace.append({"step": "guardrail_input", "input": question, "output": "불가 강행 감지"})
             trace.append({"step": "final", "input": question, "output": UNSAFE_PUSH})
             return {"answer": UNSAFE_PUSH, "contexts": [], "trace": trace}
-        recent = "\n".join(get_text(m) for m in history if isinstance(m, HumanMessage))[-600:] or "(없음)"
-        cls = await self.guard_chain.ainvoke({"history": recent, "question": question})
+        # 명백한 경우는 규칙으로 바로 분류하고(LLM 호출 절약), 애매한 것만 LCEL 분류기에 맡긴다
+        cls = rule_classify(question)
+        if cls is None:
+            recent = "\n".join(get_text(m) for m in history if isinstance(m, HumanMessage))[-600:] or "(없음)"
+            cls = await self.guard_chain.ainvoke({"history": recent, "question": question})
         trace.append({"step": "guardrail_input", "input": question, "output": f"{cls.label}: {cls.reason}"})
         if cls.label == "범위밖":
             trace.append({"step": "final", "input": question, "output": REFUSAL_OUT_OF_SCOPE})
@@ -103,6 +107,13 @@ class FishingApp:
         # 2) 에이전트 실행 (+ HITL)
         await self.agent.ainvoke({"messages": [HumanMessage(question)]}, config)
         pending = await self._pending(config)
+        if pending is None:  # 출력 가드레일: 도구로 확인해야 할 질문을 도구 없이 답했으면 한 번 다시 시도한다
+            turn = (await self._history(config))[before:]
+            reason = needs_tool_retry(question, [m.name for m in turn if isinstance(m, ToolMessage)])
+            if reason:
+                trace.append({"step": "guardrail_output", "input": question, "output": f"도구 미사용 재시도: {reason}"})
+                await self.agent.ainvoke({"messages": [HumanMessage(RETRY_MESSAGE.format(question=question))]}, config)
+                pending = await self._pending(config)
         if pending and env_true("EVAL_AUTO_APPROVE"):
             await self.agent.ainvoke(Command(resume={"decisions": [{"type": "approve"}]}), config)
             pending = await self._pending(config)
@@ -170,9 +181,10 @@ class FishingApp:
             reqs = pending.get("action_requests", []) if isinstance(pending, dict) else []
             a = reqs[0]["args"] if reqs else {}
             PII_NAMES.get().add(str(a.get("name", "")))
-            summary = (f"배ID {a.get('boat_id')} / 날짜 {a.get('date')} / 인원 {a.get('people')}명 / "
-                       f"예약자 {a.get('name')} / 연락처 {a.get('phone')}")
-            answer = f"{HITL_PENDING}\n{summary}"
+            rows = [("배ID", a.get("boat_id")), ("날짜", a.get("date")), ("인원", f"{a.get('people')}명"),
+                    ("예약자", a.get("name")), ("연락처", a.get("phone"))]
+            summary = "| 항목 | 내용 |\n|---|---|\n" + "\n".join(f"| {k} | {v} |" for k, v in rows)
+            answer = f"{HITL_PENDING}\n\n{summary}"
             trace.append({"step": "hitl_pending", "input": json.dumps(a, ensure_ascii=False), "output": answer})
             return {"answer": answer, "contexts": contexts, "trace": trace}
         ai = [m for m in msgs if isinstance(m, AIMessage) and get_text(m).strip()]
@@ -180,6 +192,15 @@ class FishingApp:
         if not answer:
             trace.append({"step": "error", "input": question, "output": "빈 응답"})
             return {"answer": ERROR_FIXED, "contexts": contexts, "trace": trace}
+        # 출력 가드레일: 고정 문구 보장 + 근거 없는 포인트 언급 감지(대화 전체의 도구 결과·사용자 질문과 대조)
+        answer, added = enforce_fixed_phrases(answer, [get_text(m) for m in msgs if isinstance(m, ToolMessage)])
+        if added:
+            trace.append({"step": "guardrail_output", "input": question, "output": "고정 문구 보장: " + " / ".join(added)})
+        evidence = "\n".join(get_text(m) for m in full if isinstance(m, (ToolMessage, HumanMessage)))
+        unsupported = unsupported_spots(answer, evidence)
+        if unsupported:
+            trace.append({"step": "guardrail_output", "input": question,
+                          "output": "도구 결과에 없는 포인트 언급: " + ", ".join(unsupported)})
         if used_regulation and REGULATION_DISCLAIMER not in answer:  # 출력 가드레일
             answer = f"{answer}\n\n{REGULATION_DISCLAIMER}"
             trace.append({"step": "guardrail_output", "input": question, "output": "참고용 안내 문구 추가"})

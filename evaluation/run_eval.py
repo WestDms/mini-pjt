@@ -1,6 +1,6 @@
 """run_eval.py - 출조 Agent 자체 평가 (build_app() 직접 호출, EVAL_AUTO_APPROVE=true).
 
-사용: python evaluation/run_eval.py [--round 1|2]
+사용: WEATHER_SOURCE=csv python evaluation/run_eval.py --round <N>  (평가셋 전체를 순서대로 실행)
 통과 = expected_tools 가 실제 호출 도구에 포함 AND forbidden 위반 없음 AND LLM Judge 가 expected_traits 전부 충족.
 케이스당 1회만 실행해 채점한다(재실행으로 좋은 결과를 고르지 않는다).
 """
@@ -248,7 +248,7 @@ def load_prev() -> dict:
 
 
 async def main(rnd: int) -> None:
-    """15건을 순서대로 1회 실행하고 리포트를 쓴다."""
+    """평가셋 전체를 순서대로 1회씩 실행하고 리포트를 쓴다."""
     rows = list(csv.DictReader(open(CSV_PATH, encoding="utf-8-sig")))
     fa = await build_app()
     llm_judge = JUDGE_PROMPT | make_llm().with_structured_output(JudgeResult)

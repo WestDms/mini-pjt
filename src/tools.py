@@ -1,6 +1,6 @@
-"""tools.py - 출조 Agent 도메인 도구 6개(에이전트에 노출하는 @tool 정의만 둔다)
+"""tools.py - 출조 Agent 도메인 도구 8개(에이전트에 노출하는 @tool 정의만 둔다)
 
-recommend_spots, check_condition, search_regulation, find_boats, book_boat, spot_info.
+recommend_spots, check_condition, search_regulation, find_boats, book_boat, spot_info, region_summary, reset_preference.
 데이터 읽기는 data, 판정은 verdict, 포인트 해석은 spots, 선호는 preferences, 예약 검증은 booking,
 데이터가 없을 때 대안 찾기는 suggest 가 맡는다.
 데이터(data/*.csv, criteria.json)는 읽기만 하고 수정하지 않는다.
@@ -13,11 +13,11 @@ from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 
 from src.booking import precheck_booking
-from src.constants import DATE_OUT_OF_RANGE, SPOT_NOT_FOUND
+from src.constants import SPOT_NOT_FOUND, date_out_of_range
 from src.data import LEVEL_RANK, boats_on, load_boats, load_spots
-from src.preferences import load_pref, store_pref
+from src.preferences import clear_pref, load_pref, store_pref
 from src.spots import find_spot_candidates, resolve_spot
-from src.suggest import (boat_alternatives, in_season, regulation_gap, relaxed_recommendations,
+from src.suggest import (boat_alternatives, in_season, rank_spots, regulation_gap, relaxed_recommendations,
                          spot_alternatives)
 from src.verdict import compute_verdict, valid_date
 from src.weather import prefetch
@@ -32,8 +32,11 @@ async def recommend_spots(runtime: ToolRuntime, date: str = "", species: str = "
     받은 어종·권역·형태는 사용자 선호로 저장하고, 빠진 값은 저장된 선호로 채운다."""
     d = valid_date(date)
     if d is None:
-        return DATE_OUT_OF_RANGE
+        return date_out_of_range()
     pref = await load_pref(runtime)
+    asked = {"species": species, "region": region, "fishing_type": fishing_type}
+    # 사용자가 말하지 않아 저장된 선호로 채운 항목(답변에서 밝히도록 결과에 담는다)
+    applied = {k: pref[k] for k, v in asked.items() if not v and pref.get(k)}
     species = species or pref.get("species", "")
     region = region or pref.get("region", "")
     ftype = fishing_type or pref.get("fishing_type", "")
@@ -69,6 +72,10 @@ async def recommend_spots(runtime: ToolRuntime, date: str = "", species: str = "
     results.sort(key=lambda r: (LEVEL_RANK[r["verdict"]], r["spot_id"]))
     out = {"date": d, "filters": {"species": species, "region": region, "fishing_type": ftype},
            "recommendations": results[:3], "total_matched": len(results)}
+    if ftype:  # 형태로 걸렀으면 판정 기준을 밝히도록 문구를 함께 준다(check_condition 의 basis 와 같은 형식)
+        out["basis"] = f"{ftype} 기준 판정"
+    if applied:
+        out["applied_preference"] = applied
     if not results:  # 조건에 맞는 곳이 없으면 조건을 하나씩 풀어 데이터에 있는 대안을 찾는다
         alt = await asyncio.to_thread(relaxed_recommendations, d, species, region, ftype)
         if alt:
@@ -85,7 +92,7 @@ async def check_condition(runtime: ToolRuntime, spot_name: str, date: str = "",
     (없으면 저장된 선호 → 포인트 기본 형태 순). 모호한 포인트명은 후보를 돌려준다."""
     d = valid_date(date)
     if d is None:
-        return DATE_OUT_OF_RANGE
+        return date_out_of_range()
     res = resolve_spot(spot_name)
     if res["status"] == "not_found":
         alt = await asyncio.to_thread(spot_alternatives, spot_name, d)
@@ -138,7 +145,7 @@ def find_boats(date: str = "", spot_name: str = "", species: str = "") -> str:
     배ID, 선박명, 항구, 어종, 남은 자리, 가격을 돌려준다."""
     d = valid_date(date)
     if d is None:
-        return DATE_OUT_OF_RANGE
+        return date_out_of_range()
     if species.strip() in ("선상", "방파제", "갯바위", "좌대", "낚시", "선상낚시"):
         species = ""  # 어종이 아니라 낚시 형태가 들어오면 무시한다(배편은 모두 선상)
     spot_ids = None
@@ -159,6 +166,11 @@ def find_boats(date: str = "", spot_name: str = "", species: str = "") -> str:
         out.append({k: b[k] for k in ("boat_id", "boat_name", "port", "spot_id", "date", "species",
                                       "capacity", "seats_left", "price")})
     res = {"date": d, "boats": out}
+    if not spot_ids and not species and len(out) > 10:  # 조건 없는 조회는 남은 자리 많은 순 10척만 보여준다
+        out.sort(key=lambda b: -int(b["seats_left"]))
+        res = {"date": d, "boats": out[:10], "total": len(out),
+               "instruction": "전체 중 남은 자리가 많은 10척만 보여준 일부 목록이다. 목록에 없는 배도 운항하므로 "
+                              "'운항하지 않는다'고 말하지 말고, 포인트·어종·권역으로 좁혀 볼지 제안하라."}
     if not out:  # 배편이 없으면 같은 포인트 다른 날짜·같은 권역 배편을 대안으로 준다
         alts = boat_alternatives(d, spot_ids, species)
         if alts:
@@ -212,4 +224,50 @@ def spot_info(spot_name: str) -> str:
                       ensure_ascii=False)
 
 
-ALL_TOOLS = [recommend_spots, check_condition, search_regulation, find_boats, book_boat, spot_info]
+@tool
+def region_summary(date: str = "", region: str = "") -> str:
+    """권역(서해|남해|동해|제주, 비우면 전체)의 날짜별 출조 여건을 요약한다.
+    가능·주의·불가 포인트 수, 발효·예비 특보와 해당 포인트, 풍속·파고 범위, 상위 포인트(가능>주의)를 돌려준다.
+    '내일 서해 날씨 어때?', '이번 주말 바다 어때?'처럼 포인트 없이 넓게 묻는 질문에 되묻기 전에 먼저 쓴다."""
+    d = valid_date(date)
+    if d is None:
+        return date_out_of_range()
+    if region and region not in ("서해", "남해", "동해", "제주"):
+        region = ""
+    spots = [s for s in load_spots() if not region or s["region"] == region]
+    prefetch(spots, d)
+    counts = {"가능": 0, "주의": 0, "불가": 0}
+    advisories, winds, waves, by_region, extra = {}, [], [], {}, {}
+    for s in spots:
+        v = compute_verdict(s, d, s["default_type"])
+        counts[v["verdict"]] += 1
+        by_region.setdefault(s["region"], {"가능": 0, "주의": 0, "불가": 0})[v["verdict"]] += 1
+        if v.get("advisory", "없음") != "없음":
+            advisories.setdefault(v.get("advisory_label") or v["advisory"], []).append(s["name"])
+        if v.get("wind_ms") is not None:
+            winds.append(v["wind_ms"])
+        if v.get("wave_m") is not None:
+            waves.append(v["wave_m"])
+        extra = extra or {k: v[k] for k in ("source", "issued", "tide_basis") if k in v}
+    top = rank_spots(spots, d)[:3]
+    out = {"date": d, "region": region or "전체", "spot_count": len(spots), "counts": counts,
+           "advisories": [{"label": k, "spots": names} for k, names in advisories.items()],
+           "wind_ms_range": [min(winds), max(winds)] if winds else None,
+           "wave_m_range": [min(waves), max(waves)] if waves else None,
+           "top_spots": top, **extra,
+           "instruction": "결론에 가능·주의·불가 곳 수와 특보를 쓰고 top_spots 를 표로 보여준 뒤, 포인트·어종으로 좁혀 볼지 제안하라."}
+    if not region:
+        out["by_region"] = by_region
+    return json.dumps(out, ensure_ascii=False)
+
+
+@tool
+async def reset_preference(runtime: ToolRuntime) -> str:
+    """저장된 사용자 선호(어종·권역·낚시 형태)를 지운다. 사용자가 '선호 초기화', '내 설정 지워줘'라고 할 때 쓴다."""
+    had = await clear_pref(runtime)
+    return json.dumps({"status": "cleared" if had else "nothing_saved",
+                       "message": "저장된 선호를 지웠습니다." if had else "저장된 선호가 없습니다."}, ensure_ascii=False)
+
+
+ALL_TOOLS = [recommend_spots, check_condition, search_regulation, find_boats, book_boat, spot_info,
+             region_summary, reset_preference]

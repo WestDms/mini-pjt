@@ -22,6 +22,7 @@ evaluation/        test_queries.csv 와 평가 리포트
 
 위 세 파일은 진입점으로 유지하고, 세부 역할은 `src/` 아래 모듈로 나눠 둔다(목록은 `README.md` 3장 "소스 구성").
 - 서버: `uvicorn src.agent:app --port 8000` / 대화형 CLI: `python -m src.agent` / Chroma 재생성: `data/chroma/` 삭제 후 `python -m src.retriever`
+- 단위 테스트: `python -m pytest tests -q` (LLM·외부 API 호출 없음. 결정적 로직을 바꾸면 먼저 돌린다) / 평가: `WEATHER_SOURCE=csv python evaluation/run_eval.py --round <N>`
 - 날씨 소스는 `.env`의 `WEATHER_SOURCE`(`csv` 기본·평가용, `kma` 실시간)로 고른다
 
 ## 주고받는 형식 (제출 규약)

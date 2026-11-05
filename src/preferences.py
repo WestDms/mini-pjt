@@ -1,4 +1,4 @@
-"""preferences.py - 장기 기억 Store(user_id)의 사용자 선호(어종·권역·형태) 읽기"""
+"""preferences.py - 장기 기억 Store(user_id)의 사용자 선호(어종·권역·형태) 읽기·지우기"""
 from langchain.tools import ToolRuntime
 
 
@@ -15,3 +15,13 @@ async def load_pref(runtime: ToolRuntime) -> dict:
         return {}
     item = await store.aget(("users", uid), "preference")
     return dict(item.value) if item else {}
+
+
+async def clear_pref(runtime: ToolRuntime) -> bool:
+    """Store(user_id)에 저장된 선호를 지운다. 지울 대상이 있었으면 True."""
+    store, uid = store_pref(runtime)
+    if store is None or not uid:
+        return False
+    had = await store.aget(("users", uid), "preference") is not None
+    await store.adelete(("users", uid), "preference")
+    return had

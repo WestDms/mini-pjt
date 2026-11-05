@@ -1,5 +1,5 @@
 """booking.py - 선상 예약 사전검증(결정적). 도구와 HITL 미들웨어가 함께 쓴다"""
-from src.constants import DATE_OUT_OF_RANGE
+from src.constants import date_out_of_range
 from src.data import boats_on, load_spots
 from src.verdict import compute_verdict, valid_date
 
@@ -12,7 +12,7 @@ def precheck_booking(boat_id: str, date: str, people, name: str = "x", phone: st
         return {"status": "missing_fields", "reason": "배ID·날짜·인원·이름·전화번호가 모두 필요합니다."}
     d = valid_date(date)
     if d is None:
-        return {"status": "date_out_of_range", "reason": DATE_OUT_OF_RANGE}
+        return {"status": "date_out_of_range", "reason": date_out_of_range()}
     boat = next((b for b in boats_on(d) if b["boat_id"] == str(boat_id).strip().upper()), None)
     if boat is None:
         return {"status": "boat_not_found", "reason": f"해당 날짜에 {boat_id} 배편이 없어 예약할 수 없습니다."}

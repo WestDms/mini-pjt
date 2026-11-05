@@ -7,8 +7,8 @@ from src.weather import supported_dates, today
 ROOT = Path(__file__).resolve().parent.parent
 TRACE_DIR = ROOT / "traces"
 STATE_DB = ROOT / "data" / "agent_state.sqlite"
-TODAY = today()  # csv: TODAY 환경변수/criteria.json, kma: 실제 KST 오늘(서버 시작 시점 기준)
-DATES = supported_dates()  # D0, D+1, D+2
+TODAY = today()  # 모듈을 불러온 시점의 값(호환용). 요청 처리에는 weather.today() 를 그때그때 부른다
+DATES = supported_dates()  # 모듈을 불러온 시점의 지원 날짜(호환용)
 TIMEOUT_SEC = 120
 
 
@@ -22,4 +22,12 @@ SPOT_NOT_FOUND = "요청하신 포인트는 데이터에 없습니다. 서해·�
 REGULATION_DISCLAIMER = "※ 참고용(실제 법령 확인 필요): 교육용 가상 규정 기준입니다."
 HITL_PENDING = "예약을 진행하려면 승인이 필요합니다. 아래 예약 내용을 확인해 주세요."
 BOOKING_CANCELLED = "예약 요청이 취소되었습니다."
+
+
+def date_out_of_range() -> str:
+    """지원 날짜 범위 안내 고정 문구를 요청 시점의 지원 날짜로 만든다(실시간 모드는 날마다 범위가 바뀐다)."""
+    ds = supported_dates()
+    return f"죄송합니다. {ds[0]} ~ {ds[-1]} 범위의 날씨·물때 정보만 제공할 수 있어요."
+
+
 DEMO_QUESTION = "11월 7일 B03 2명 예약해주세요. 이름은 홍길동, 전화번호는 010-1234-5678입니다."

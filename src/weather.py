@@ -4,7 +4,7 @@ WEATHER_SOURCE=csv (기본) : data/forecast.csv 고정 스냅샷. 평가·시연
 WEATHER_SOURCE=kma        : 기상청 공공데이터 API 실시간 조회
   - 풍속(WSD)·파고(WAV) : 단기예보 getVilageFcst (격자 nx, ny)
   - 특보                : 기상특보 getPwnStatus 의 발효 중 특보(t6)와 해당 날짜 예비특보(t7)를 SPOT_GEO 해상구역 이름으로 매칭
-  - 물때                : 월령(달의 위상)으로 계산한 사리/중물/조금 근사. 별도 API 키가 필요 없다
+  - 물때                : src/tide.py (정밀 삭망 계산 기반 물때 이름·단계, 선택적으로 국립해양조사원 만조·간조)
 """
 import csv
 import json
@@ -14,13 +14,15 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date as Date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote
 
 import httpx
 from dotenv import load_dotenv
+
+from src.tide import tide_info
 
 load_dotenv()
 
@@ -98,8 +100,6 @@ SPOT_GEO = {
     "J12": (33.960, 126.300, "제주도북부앞바다;제주도앞바다"),
     "J13": (33.510, 126.470, "제주도북부앞바다;제주도앞바다"),
 }
-SYNODIC = 29.530588853  # 삭망월(일)
-NEW_MOON_REF = datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)  # 기준 삭(신월) 시각
 
 
 class WeatherError(Exception):
@@ -126,10 +126,10 @@ def today() -> str:
 
 
 def supported_dates() -> list[str]:
-    """지원 날짜 목록. csv 는 criteria.json 의 supported_dates, kma 는 오늘~모레(D0~D+2)."""
+    """지원 날짜 목록. csv 는 criteria.json 의 supported_dates, kma 는 오늘~글피(D0~D+3, 단기예보 제공 범위)."""
     if source() == "kma":
         d0 = datetime.strptime(today(), "%Y-%m-%d")
-        return [(d0 + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(3)]
+        return [(d0 + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(4)]
     return list(_criteria()["supported_dates"])
 
 
@@ -347,29 +347,6 @@ def _advisory(spot: dict, date: str) -> tuple[str, str, list[str]]:
     return next((w for w in WARN_ORDER if w in found), "없음"), label, notes
 
 
-def moon_age(d: Date) -> float:
-    """해당 날짜 KST 정오의 월령(삭 이후 경과 일수, 0~29.53)."""
-    t = datetime(d.year, d.month, d.day, 12, tzinfo=KST)
-    return ((t - NEW_MOON_REF).total_seconds() / 86400.0) % SYNODIC
-
-
-def tide_class(date: str) -> str:
-    """월령으로 물때를 사리/중물/조금으로 근사한다(평균 삭망월 기준이라 ±1일 안팎 오차).
-    사리: 조차가 삭·망보다 1~2일 늦게 커지므로 삭·망+1.5일 ±2일. 조금: 상·하현(음력 8·23일 무렵) ±1.5일."""
-    a = moon_age(datetime.strptime(date, "%Y-%m-%d").date())
-
-    def dist(c: float) -> float:
-        x = abs(a - c) % SYNODIC
-        return min(x, SYNODIC - x)
-
-    lag = 1.5
-    if min(dist(lag), dist(SYNODIC / 2 + lag)) <= 2.0:
-        return "사리"
-    if min(dist(SYNODIC / 4), dist(SYNODIC * 3 / 4)) <= 1.5:
-        return "조금"
-    return "중물"
-
-
 def _kma_forecast(spot: dict, date: str) -> dict | None:
     """기상청 API 로 (포인트, 날짜) 값을 만든다. 풍속 조회 실패는 WeatherError, 특보 조회 실패는 notes 로 남긴다."""
     lat, lon, _ = SPOT_GEO[spot["spot_id"]]
@@ -382,7 +359,7 @@ def _kma_forecast(spot: dict, date: str) -> dict | None:
         adv, label, notes = _advisory(spot, date)
     except WeatherError:
         adv, label, notes = "없음", "특보 조회 실패(미반영)", ["특보 조회 실패로 특보 미반영"]
+    # 물때: 정밀 삭망 계산 기반 음력일 → 물때 이름·단계, 키가 있으면 만조·간조 시각(src/tide.py)
     return {"wind_ms": wind, "wave_m": _wave(spot, nx, ny, date), "advisory": adv, "advisory_label": label,
-            "tide": tide_class(date),
-            "source": "기상청 단기예보(실시간)", "issued": g["issued"],
-            "tide_basis": "월령 계산 근사", "notes": notes}
+            **tide_info(spot["region"], lat, lon, date),
+            "source": "기상청 단기예보(실시간)", "issued": g["issued"], "notes": notes}

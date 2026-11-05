@@ -44,6 +44,7 @@ def compute_verdict(spot: dict, date: str, ftype: str) -> dict:
         if down:
             level = down
             notes.append("사리 물때로 한 단계 하향")
-    extra = {k: f[k] for k in ("advisory_label", "source", "issued", "tide_basis") if k in f}  # kma 모드에서만 붙는 정보
+    extra = {k: f[k] for k in ("advisory_label", "tide_name", "lunar_day", "tide_times", "source", "issued", "tide_basis")
+             if k in f}  # kma 모드에서만 붙는 정보
     return {"verdict": level, "wind_ms": wind, "wave_m": wave, "advisory": f["advisory"],
             "tide": f["tide"], "notes": notes, **extra}

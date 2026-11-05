@@ -36,3 +36,6 @@ aiosqlite
 pydantic>=2
 # 3차: 기상청 실시간 API 호출(src/weather.py)
 httpx
+
+# 개발용: 단위 테스트(tests/)
+pytest

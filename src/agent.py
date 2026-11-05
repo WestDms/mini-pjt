@@ -26,7 +26,7 @@ from src.constants import STATE_DB
 from src.guardrails import build_guard_chain
 from src.masking import mask_text
 from src.middleware import BookingPrecheckMiddleware, ToolFaultMiddleware
-from src.prompts import system_prompt
+from src.prompts import dynamic_system_prompt
 from src.server import create_api
 from src.tools import ALL_TOOLS
 from src.tracing import get_langsmith_client
@@ -66,8 +66,8 @@ async def build_app() -> FishingApp:
     agent = create_agent(
         model=llm,
         tools=ALL_TOOLS,
-        system_prompt=system_prompt(),
         middleware=[
+            dynamic_system_prompt,  # 모델 호출마다 오늘 날짜·요일을 다시 계산한 시스템 프롬프트
             ToolFaultMiddleware(),
             ToolCallLimitMiddleware(run_limit=8, exit_behavior="error"),
             ToolCallLimitMiddleware(tool_name="book_boat", run_limit=1, exit_behavior="error"),
