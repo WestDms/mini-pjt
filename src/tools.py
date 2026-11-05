@@ -1,6 +1,6 @@
-"""tools.py - 출조 Agent 도메인 도구 8개(에이전트에 노출하는 @tool 정의만 둔다)
+"""tools.py - 출조 Agent 도메인 도구 9개(에이전트에 노출하는 @tool 정의만 둔다)
 
-recommend_spots, check_condition, search_regulation, find_boats, book_boat, spot_info, region_summary, reset_preference.
+recommend_spots, check_condition, search_regulation, find_boats, book_boat, spot_info, search_spots, region_summary, reset_preference.
 데이터 읽기는 data, 판정은 verdict, 포인트 해석은 spots, 선호는 preferences, 예약 검증은 booking,
 데이터가 없을 때 대안 찾기는 suggest 가 맡는다.
 데이터(data/*.csv, criteria.json)는 읽기만 하고 수정하지 않는다.
@@ -16,7 +16,7 @@ from src.booking import precheck_booking
 from src.constants import SPOT_NOT_FOUND, date_out_of_range
 from src.data import LEVEL_RANK, boats_on, load_boats, load_spots
 from src.preferences import clear_pref, load_pref, store_pref
-from src.spots import find_spot_candidates, resolve_spot
+from src.spots import find_spot_candidates, resolve_spot, search_spot_list
 from src.suggest import (boat_alternatives, in_season, rank_spots, regulation_gap, relaxed_recommendations,
                          spot_alternatives)
 from src.verdict import compute_verdict, valid_date
@@ -207,7 +207,8 @@ def spot_info(spot_name: str) -> str:
                           ensure_ascii=False)
     if res["status"] == "ambiguous":
         return json.dumps({"status": "ambiguous", "query": spot_name, "candidate_names": res["candidate_names"],
-                           "instruction": "어느 포인트인지 사용자에게 후보 중에서 되물어라."}, ensure_ascii=False)
+                           "instruction": "어느 포인트인지 후보 중에서 되묻는다. 도·시군구 같은 지역 이름이면 "
+                                          "search_spots 로 그 지역 포인트 목록을 보여줘도 된다."}, ensure_ascii=False)
     s = next(x for x in load_spots() if x["spot_id"] == res["candidates"][0])
     month = int(valid_date("")[5:7])
     species = [{"species": sp, "season": f"{a}월~{b}월", "in_season_now": in_season(s, sp, month)}
@@ -218,10 +219,30 @@ def spot_info(spot_name: str) -> str:
             boats[b["boat_id"]] = {"boat_id": b["boat_id"], "boat_name": b["boat_name"], "port": b["port"],
                                    "species": b["species"].replace(";", ", "), "price": b["price"]}
     return json.dumps({"status": "ok", "spot_id": s["spot_id"], "name": s["name"], "region": s["region"],
-                       "area": s["area"], "fishing_types": s["types"], "default_type": s["default_type"],
+                       "province": s["province"], "city": s["city"], "info": s["info"], "facilities": s["facilities"],
+                       "fishing_types": s["types"], "default_type": s["default_type"],
                        "species": species, "boats": list(boats.values()),
                        "note": "날짜별 남은 자리는 find_boats, 출조 가능 여부는 check_condition 으로 확인한다."},
                       ensure_ascii=False)
+
+
+@tool
+def search_spots(query: str = "", region: str = "", fishing_type: str = "", species: str = "") -> str:
+    """포인트(출조지)를 검색해 목록을 돌려준다. query 에는 도·시군구 이름(예: 강원도, 거제시, 통영)이나
+    키워드(예: 주차, 화장실, 섬, 입문자)를 공백으로 넣는다(모두 만족하는 곳만). region 은 서해|남해|동해|제주,
+    fishing_type 은 방파제|갯바위|선상|좌대, species 는 어종 이름. '강원도 방파제 어디 있어?', '거제시 포인트 알려줘',
+    '주차 되는 갯바위' 같은 질문에 쓴다. 날씨 판정은 하지 않으므로 출조 가능 여부는 check_condition·recommend_spots 로 본다."""
+    if fishing_type and fishing_type not in ("방파제", "갯바위", "선상", "좌대"):
+        query, fishing_type = f"{query} {fishing_type}".strip(), ""
+    if region and region not in ("서해", "남해", "동해", "제주"):
+        query, region = f"{query} {region}".strip(), ""  # '강원도' 같은 도 이름이 region 으로 오면 키워드로 돌린다
+    res = search_spot_list(query, region, fishing_type, species)
+    res["conditions"] = {"query": query, "region": region, "fishing_type": fishing_type, "species": species}
+    if not res["total"]:
+        res["instruction"] = "조건에 맞는 포인트가 없다고 말하고, 키워드를 줄이거나 권역 단위로 다시 찾아볼지 제안하라."
+    elif res["total"] > len(res["spots"]):
+        res["instruction"] = f"전체 {res['total']}곳 중 일부다. 형태·어종으로 좁혀 볼지 제안하라."
+    return json.dumps(res, ensure_ascii=False)
 
 
 @tool
@@ -269,5 +290,5 @@ async def reset_preference(runtime: ToolRuntime) -> str:
                        "message": "저장된 선호를 지웠습니다." if had else "저장된 선호가 없습니다."}, ensure_ascii=False)
 
 
-ALL_TOOLS = [recommend_spots, check_condition, search_regulation, find_boats, book_boat, spot_info,
+ALL_TOOLS = [recommend_spots, check_condition, search_regulation, find_boats, book_boat, spot_info, search_spots,
              region_summary, reset_preference]

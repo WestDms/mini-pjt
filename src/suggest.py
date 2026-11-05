@@ -4,6 +4,7 @@ import re
 
 from src.chunker import load_chunks
 from src.data import LEVEL_RANK, boats_on, load_spots
+from src.spots import place_keys
 from src.verdict import compute_verdict
 from src.weather import prefetch, supported_dates
 
@@ -32,7 +33,10 @@ def infer_region(text: str) -> str | None:
     t = re.sub(r"\s+", "", text or "")
     scores = {r: sum(1 for k in ks if k in t) for r, ks in REGION_HINTS.items()}
     best = max(scores, key=scores.get)
-    return best if scores[best] else None
+    if scores[best]:
+        return best
+    # 단서 목록에 없으면 포인트 데이터의 도·시군구 이름(예: 영덕군, 울주)으로 찾는다
+    return next((s["region"] for s in load_spots() if any(k in t for k in place_keys(s))), None)
 
 
 def in_season(spot: dict, species: str, month: int) -> bool:
@@ -71,7 +75,7 @@ TYPE_WORDS = r"방파제|갯바위|선착장|좌대|선상|낚시|포구|부두"
 
 
 def spot_alternatives(query: str, date: str, n: int = 3) -> dict:
-    """없는 포인트 대신 제안할 포인트. ①이름이 비슷한 포인트 ②질문 지명과 지역(area)이 같은 포인트
+    """없는 포인트 대신 제안할 포인트. ①이름이 비슷한 포인트 ②질문 지명과 도·시군구가 같은 포인트
     ③짐작한 권역에서 판정이 나쁘지 않은 포인트 ④권역을 모르면 권역별 1곳씩."""
     spots = load_spots()
     q = re.sub(r"\s+", "", query or "")
@@ -84,8 +88,8 @@ def spot_alternatives(query: str, date: str, n: int = 3) -> dict:
     region = infer_region(q) or (picks[0]["region"] if picks else None)
     if region:
         pool = [s for s in spots if s["region"] == region]
-        local = [s for s in pool if any(len(w) >= 2 and w in q for w in s["area"].split())]
-        # 같은 지역(area) 포인트는 판정과 무관하게 먼저 보여주고, 같은 권역은 '불가'를 뺀 곳만 덧붙인다
+        local = [s for s in pool if any(k in q for k in place_keys(s))]
+        # 같은 도·시군구 포인트는 판정과 무관하게 먼저 보여주고, 같은 권역은 '불가'를 뺀 곳만 덧붙인다
         local.sort(key=lambda s: s["spot_id"])
         picks += [s for s in local if s not in picks]
         ranked = rank_spots(pool, date)

@@ -5,7 +5,8 @@
 - 출조지 추천: 어종·시즌·권역·형태 필터 → 불가 제외 → 가능>주의, 동률은 spot_id 순 상위 3곳
 - 출조 가능 판정: `data/criteria.json` 임계값으로 풍속·파고·특보·사리를 결정적으로 계산(가능/주의/불가)
 - 넓은 질문("내일 서해 날씨", "출조지 추천")은 되묻기 전에 먼저 조회해 보여준다: 권역 요약(가능·주의·불가 곳 수, 특보, 상위 포인트)
-- 포인트 정보: 포인트별 지역·낚시 형태·대상어종과 시즌(이번 달 시즌 여부)·배편 안내
+- 포인트 정보: 포인트별 도(광역시·도)·시군구·소개·편의시설·낚시 형태·대상어종과 시즌(이번 달 시즌 여부)·배편 안내
+- 포인트 검색: 도·시군구(예: 강원도, 거제시)·권역·형태·어종·키워드(예: 주차, 섬)로 조건에 맞는 포인트 목록을 찾는다
 - 사용자 선호(장기 기억): 추천에 저장된 선호를 쓰면 어떤 선호를 적용했는지 밝히고, "선호 초기화"로 지울 수 있다
 - 규정 RAG: `data/regulations/` 4개 문서를 BM25+Chroma 하이브리드로 검색. 질문의 어종이 규정 제목과 일치하면 그 청크를 우선
 - 가상 선상 예약(HITL): 예약번호만 발급하며 데이터는 바꾸지 않는다. 승인 없이는 실행하지 않는다
@@ -18,7 +19,7 @@
 ## 2. 활용 패턴
 | 패턴 | 적용 |
 |---|---|
-| 단일 `create_agent` + 도구 8개 | recommend_spots, check_condition, search_regulation, find_boats, book_boat, spot_info(포인트 정보), region_summary(권역 요약), reset_preference(선호 초기화) |
+| 단일 `create_agent` + 도구 9개 | recommend_spots, check_condition, search_regulation, find_boats, book_boat, spot_info(포인트 정보), search_spots(포인트 검색), region_summary(권역 요약), reset_preference(선호 초기화) |
 | 하이브리드 RAG | BM25 + Chroma(Titan 임베딩 `amazon.titan-embed-text-v2:0`) |
 | HITL | book_boat interrupt. `EVAL_AUTO_APPROVE=true`면 자동 승인, 기본은 `HITL_PENDING` 응답 |
 | 가드레일 | 입력: 규칙 우선(명백한 인젝션은 즉시 거절, 낚시 키워드가 분명하면 LLM 분류 생략) → 나머지만 LCEL 분류(정상/범위밖/인젝션), 불가 강행 결정적 감지. 출력: 규정 안내 문구 자동 부착, '포인트 없음' 고정 문구 코드로 보장, 규정·판정 질문인데 도구를 안 쓰면 1회 재시도, 도구 결과에 없는 포인트 언급 감지(트레이스 기록) |
@@ -33,7 +34,7 @@
 ```
 POST /query {question, thread_id?, user_id?}
   → 입력 검증(422) → 입력 가드레일(LCEL) → create_agent(Bedrock Claude Haiku 4.5, temperature=0)
-       ├─ recommend_spots / region_summary / check_condition / spot_info / find_boats / book_boat / reset_preference
+       ├─ recommend_spots / region_summary / check_condition / spot_info / search_spots / find_boats / book_boat / reset_preference
        │     데이터: data/*.csv·criteria.json, 날씨: src/weather.py (forecast.csv 또는 기상청 API)
        │     데이터가 없으면 src/suggest.py 가 대안을 붙여 돌려줌
        └─ search_regulation → retriever(어종 제목 일치 우선 + BM25·Chroma 하이브리드)
@@ -49,7 +50,7 @@ src/cli.py         대화형 CLI·데모                          src/prompts.py
 src/guardrails.py  입력 가드레일                            src/masking.py  개인정보 마스킹
 src/middleware.py  도구 예외 분류·예약 사전검증 미들웨어     src/tracing.py  트레이스 기록
 src/constants.py   고정 문구·경로·날짜                      src/utils.py    공용 도우미
-src/tools.py       에이전트 도구 8개(@tool)                 src/suggest.py  데이터 없을 때 대안 찾기
+src/tools.py       에이전트 도구 9개(@tool)                 src/suggest.py  데이터 없을 때 대안 찾기
 src/output_guard.py 출력 가드레일(고정 문구·근거 대조·재시도 판단)  src/tide.py   물때 계산·조석예보
 src/data.py        CSV·JSON 읽기(매일 운항 배편 포함)        src/verdict.py  날짜 검증·출조 판정
 src/spots.py       포인트명 해석                            src/booking.py  예약 사전검증
@@ -114,7 +115,8 @@ Sonnet 4.5로 처음 시도했을 때는 Bedrock 일일 토큰 한도(`Throttlin
 | 에이전트 조립 | `src/agent.py` `make_llm`, `async build_app()` |
 | FastAPI `/query` | `src/server.py` `create_api`, `QueryRequest` (`src.agent:app` 으로 실행) |
 | CLI 대화형·데모 | `src/cli.py` `_chat`, `_demo` (`python -m src.agent` 로 실행) |
-| 도구 정의 | `src/tools.py` `recommend_spots`, `check_condition`, `spot_info`, `search_regulation`, `find_boats`, `book_boat` |
+| 도구 정의 | `src/tools.py` `recommend_spots`, `check_condition`, `spot_info`, `search_spots`, `search_regulation`, `find_boats`, `book_boat` |
+| 포인트 검색·지역명 해석(도·시군구 별칭) | `src/spots.py` `search_spot_list`, `place_keys`, `resolve_spot` |
 | 데이터가 없을 때 대안 | `src/suggest.py` `spot_alternatives`, `relaxed_recommendations`, `boat_alternatives`, `regulation_gap` |
 | 데이터 로딩(매일 운항 배편) / 판정 / 포인트 해석 / 선호 / 예약 검증 | `src/data.py` `boats_on`, `src/verdict.py`, `src/spots.py`, `src/preferences.py`, `src/booking.py` |
 | 날씨 소스(csv·기상청, 포인트 좌표 `SPOT_GEO`) | `src/weather.py` `get_forecast` |
@@ -142,6 +144,7 @@ Sonnet 4.5로 처음 시도했을 때는 Bedrock 일일 토큰 한도(`Throttlin
 | 출력 가드레일 | `src/output_guard.py`: 고정 문구 보장, 도구 미사용 재시도, 근거 없는 포인트 언급 감지 |
 | 물때 | `src/tide.py`: 정밀 삭망 계산 기반 물때 이름, 국립해양조사원 만조·간조(키 있을 때) |
 | 속도·비용 | 입력 가드레일 규칙 우선 처리로 LLM 분류 호출 생략, 시스템 프롬프트 정리 |
+| 포인트 상세·검색 | `spots.csv`에 province(도)·city(시군구)·info(소개)·facilities(편의시설) 추가, `search_spots` 도구, 도·시군구 이름으로 포인트 해석 |
 | 테스트·평가 | `tests/` pytest 22개(결정적 로직), 평가셋 21건으로 확장 → 3차 19/21, 회귀 수정 후 4차 21/21 |
 | 안정성 | 규정 검색 병렬 호출 시 Chroma 초기화 충돌 수정(잠금), 어종 제목 일치 청크 우선 검색, 오류 트레이스에 예외 요약 기록 |
 | 평가셋 | #7·#9 질문을 데이터에 없는 대상(독도·개복치)으로 교체 |
