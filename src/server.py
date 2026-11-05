@@ -1,12 +1,13 @@
 """server.py - FastAPI 서버: POST /query 로 question 을 받아 answer, contexts, trace 를 돌려준다"""
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, StrictStr, field_validator
+from pydantic import BaseModel, ConfigDict, StrictStr, field_validator
 
 from src.masking import mask_text
 from src.vectorstore import build_chroma
@@ -14,8 +15,12 @@ from src.vectorstore import build_chroma
 logger = logging.getLogger("fishing_agent")
 
 
+ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
 class QueryRequest(BaseModel):
-    """POST /query 본문. question 은 필수(공백 제외 1~500자 문자열)."""
+    """POST /query 본문. question 은 필수(공백 제외 1~500자 문자열). 알 수 없는 필드는 거부한다(파라미터 변조 방지)."""
+    model_config = ConfigDict(extra="forbid")
     question: StrictStr
     thread_id: Optional[StrictStr] = None
     user_id: Optional[StrictStr] = None
@@ -26,6 +31,14 @@ class QueryRequest(BaseModel):
         """공백 제외 길이가 1~500자인지 검사한다."""
         if not 1 <= len(v.strip()) <= 500:
             raise ValueError("question 은 공백 제외 1~500자여야 합니다")
+        return v
+
+    @field_validator("thread_id", "user_id")
+    @classmethod
+    def _check_id(cls, v: Optional[str]) -> Optional[str]:
+        """thread_id·user_id 는 영문·숫자·_- 1~64자만 허용한다(다른 저장소 키 조작·인젝션 방지)."""
+        if v is not None and not ID_RE.fullmatch(v):
+            raise ValueError("thread_id·user_id 는 영문·숫자·_- 1~64자여야 합니다")
         return v
 
 

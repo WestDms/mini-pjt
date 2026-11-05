@@ -1,5 +1,6 @@
-"""middleware.py - 에이전트 미들웨어(도구 예외 분류, 예약 사전검증)와 오류 사유 코드"""
+"""middleware.py - 에이전트 미들웨어(도구 예외 분류, 도구 인자 검증, 예약 사전검증)와 오류 사유 코드"""
 import asyncio
+import logging
 
 from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
@@ -7,6 +8,10 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphBubbleUp
 
 from src.booking import precheck_booking
+from src.guardrails import validate_tool_args
+
+logger = logging.getLogger("fishing_agent")
+ARG_REJECTED = "요청 값이 올바르지 않아 실행하지 않았습니다({reason}). 값을 바로잡아 다시 요청해 달라고 안내하라."
 
 
 class ToolFault(Exception):
@@ -35,6 +40,28 @@ class ToolFaultMiddleware(AgentMiddleware):
             raise ToolFault(repr(e)) from e
 
 
+class ToolArgGuardMiddleware(AgentMiddleware):
+    """도구 인자 검증 미들웨어. 허용 인자·형식·길이·공격 패턴을 실행 직전에 검사하고, 위반하면 도구를 실행하지 않는다."""
+
+    def _reject(self, request):
+        """인자가 잘못됐으면 거절 ToolMessage, 괜찮으면 None."""
+        call = request.tool_call
+        reason = validate_tool_args(call["name"], call.get("args") or {})
+        if reason is None:
+            return None
+        logger.warning("tool arg rejected tool=%s: %s", call["name"], reason)
+        return ToolMessage(content=ARG_REJECTED.format(reason=reason), name=call["name"],
+                           tool_call_id=call["id"], status="error")
+
+    def wrap_tool_call(self, request, handler):
+        """동기 도구 호출 전에 인자를 검사한다."""
+        return self._reject(request) or handler(request)
+
+    async def awrap_tool_call(self, request, handler):
+        """비동기 도구 호출 전에 인자를 검사한다."""
+        return self._reject(request) or await handler(request)
+
+
 def error_code(e: BaseException) -> str:
     """예외를 사유 코드(tool_exception | model_exception | tool_call_limit | timeout)로 분류한다."""
     if isinstance(e, (asyncio.TimeoutError, TimeoutError)):
@@ -60,6 +87,11 @@ class BookingPrecheckMiddleware(AgentMiddleware):
         for c in last.tool_calls:
             if c["name"] == "book_boat":
                 a = c["args"]
+                reason = validate_tool_args("book_boat", a)  # 변조된 인자는 HITL 승인 요청 전에 거절
+                if reason:
+                    bad.append(ToolMessage(content=ARG_REJECTED.format(reason=reason), name="book_boat",
+                                           tool_call_id=c["id"]))
+                    continue
                 pc = precheck_booking(a.get("boat_id"), a.get("date"), a.get("people"),
                                       a.get("name"), a.get("phone"))
                 if pc["status"] != "ok":

@@ -22,8 +22,8 @@
 | 단일 `create_agent` + 도구 9개 | recommend_spots, check_condition, search_regulation, find_boats, book_boat, spot_info(포인트 정보), search_spots(포인트 검색), region_summary(권역 요약), reset_preference(선호 초기화) |
 | 하이브리드 RAG | BM25 + Chroma(Titan 임베딩 `amazon.titan-embed-text-v2:0`) |
 | HITL | book_boat interrupt. `EVAL_AUTO_APPROVE=true`면 자동 승인, 기본은 `HITL_PENDING` 응답 |
-| 가드레일 | 입력: 규칙 우선(명백한 인젝션은 즉시 거절, 낚시 키워드가 분명하면 LLM 분류 생략) → 나머지만 LCEL 분류(정상/범위밖/인젝션), 불가 강행 결정적 감지. 출력: 규정 안내 문구 자동 부착, '포인트 없음' 고정 문구 코드로 보장, 규정·판정 질문인데 도구를 안 쓰면 1회 재시도, 도구 결과에 없는 포인트 언급 감지(트레이스 기록) |
-| 미들웨어 | ToolCallLimit(전체 8, book_boat 1), 이름·전화 마스킹 |
+| 가드레일 | 입력: 정규화(NFKC·제어/zero-width 문자 제거) 후 공격 패턴(SQL·명령어·경로·스크립트·템플릿 인젝션, 도구 호출 위조, 좌석·가격·판정·ID 변조 지시) 즉시 거절 → 규칙 우선(명백한 인젝션은 즉시 거절, 낚시 키워드가 분명하면 LLM 분류 생략) → 나머지만 LCEL 분류(정상/범위밖/인젝션), 불가 강행 결정적 감지. 출력: 규정 안내 문구 자동 부착, '포인트 없음' 고정 문구 코드로 보장, 규정·판정 질문인데 도구를 안 쓰면 1회 재시도, 도구 결과에 없는 포인트 언급 감지(트레이스 기록) |
+| 미들웨어 | ToolCallLimit(전체 8, book_boat 1), 도구 인자 검증(허용 인자·형식·길이·공격 패턴, 위반 시 도구 실행 안 함), 이름·전화 마스킹 |
 | 기억 | SQLite 체크포인터(thread_id, 단기), SQLite Store(user_id, 장기 선호) |
 | 트레이싱 | LANGSMITH_API_KEY가 있으면 LangSmith, 없으면 `traces/*.jsonl`. 오류 시 사유 코드와 예외 요약(마스킹)을 남김 |
 | 실시간 외부 데이터 | 기상청 단기예보(풍속·파고)·기상특보(발효 특보+예비특보), 물때는 월령 계산. 답변에 발표 시각 출처 표기 |
@@ -33,7 +33,7 @@
 ## 3. 아키텍처
 ```
 POST /query {question, thread_id?, user_id?}
-  → 입력 검증(422) → 입력 가드레일(LCEL) → create_agent(Bedrock Claude Haiku 4.5, temperature=0)
+  → 입력 검증(422: 알 수 없는 필드, thread_id·user_id 형식) → 입력 정규화·공격 패턴 차단 → 입력 가드레일(LCEL) → create_agent(Bedrock Claude Haiku 4.5, temperature=0)
        ├─ recommend_spots / region_summary / check_condition / spot_info / search_spots / find_boats / book_boat / reset_preference
        │     데이터: data/*.csv·criteria.json, 날씨: src/weather.py (forecast.csv 또는 기상청 API)
        │     데이터가 없으면 src/suggest.py 가 대안을 붙여 돌려줌
@@ -47,8 +47,8 @@ POST /query {question, thread_id?, user_id?}
 src/agent.py       메인 에이전트 조립(make_llm, build_app) + 실행 진입점(app, __main__)
 src/app.py         요청 처리 파이프라인(FishingApp)        src/server.py   FastAPI POST /query
 src/cli.py         대화형 CLI·데모                          src/prompts.py  시스템 프롬프트
-src/guardrails.py  입력 가드레일                            src/masking.py  개인정보 마스킹
-src/middleware.py  도구 예외 분류·예약 사전검증 미들웨어     src/tracing.py  트레이스 기록
+src/guardrails.py  입력 가드레일(정규화·공격 패턴·도구 인자 검증 규칙)  src/masking.py  개인정보 마스킹
+src/middleware.py  도구 예외 분류·도구 인자 검증·예약 사전검증 미들웨어  src/tracing.py  트레이스 기록
 src/constants.py   고정 문구·경로·날짜                      src/utils.py    공용 도우미
 src/tools.py       에이전트 도구 9개(@tool)                 src/suggest.py  데이터 없을 때 대안 찾기
 src/output_guard.py 출력 가드레일(고정 문구·근거 대조·재시도 판단)  src/tide.py   물때 계산·조석예보
@@ -108,6 +108,7 @@ Sonnet 4.5로 처음 시도했을 때는 Bedrock 일일 토큰 한도(`Throttlin
 | 고정 문구 상수·경로 | `src/constants.py` (`src.agent` 에서도 같은 이름으로 참조 가능) |
 | 마스킹 | `src/masking.py` `mask_text`, `mask_name` |
 | 입력 가드레일 / 불가 강행 감지 | `src/guardrails.py` `GuardrailClassification`, `build_guard_chain`, `is_unsafe_push` |
+| 입력 보안(정규화·공격 패턴·도구 인자 검증) | `src/guardrails.py` `normalize_input`, `ATTACK_PATTERNS`, `detect_attack`, `validate_tool_args` / `src/middleware.py` `ToolArgGuardMiddleware` / `src/server.py` `QueryRequest`(ID 형식·알 수 없는 필드 거부) |
 | 시스템 프롬프트 | `src/prompts.py` `system_prompt` |
 | 트레이싱 | `src/tracing.py` `write_trace` |
 | 미들웨어·오류 사유 코드 | `src/middleware.py` `ToolFaultMiddleware`, `BookingPrecheckMiddleware`, `error_code` |
