@@ -4,38 +4,62 @@
 입문~중급 생활낚시인이 "어디로, 언제 나가도 되는지"를 한 번에 묻는 출조 Agent입니다.
 - 출조지 추천: 어종·시즌·권역·형태 필터 → 불가 제외 → 가능>주의, 동률은 spot_id 순 상위 3곳
 - 출조 가능 판정: `data/criteria.json` 임계값으로 풍속·파고·특보·사리를 결정적으로 계산(가능/주의/불가)
-- 규정 RAG: `data/regulations/` 4개 문서를 BM25+Chroma 하이브리드로 검색
+- 포인트 정보: 포인트별 지역·낚시 형태·대상어종과 시즌(이번 달 시즌 여부)·배편 안내
+- 규정 RAG: `data/regulations/` 4개 문서를 BM25+Chroma 하이브리드로 검색. 질문의 어종이 규정 제목과 일치하면 그 청크를 우선
 - 가상 선상 예약(HITL): 예약번호만 발급하며 데이터는 바꾸지 않는다. 승인 없이는 실행하지 않는다
-- 날짜는 TODAY=2026-11-06 고정, 2026-11-06~08 범위만 지원
+- 데이터가 없을 때: '없다'로 끝내지 않고 데이터에 있는 대안(비슷한·가까운 포인트, 조건을 푼 추천, 다른 날짜·권역 배편, 규정에 있는 어종)을 제안
+- 날씨: 기본(`WEATHER_SOURCE=csv`)은 TODAY=2026-11-06 고정 스냅샷(2026-11-06~08). `WEATHER_SOURCE=kma`면 기상청 실시간 예보로 실제 오늘~모레를 지원
+- 데이터 규모(모두 가상): 포인트 62곳, 선박 33척(매일 운항), 금어기 25종·체장 21항목
 
 ## 2. 활용 패턴
 | 패턴 | 적용 |
 |---|---|
-| 단일 `create_agent` + 도구 5개 | recommend_spots, check_condition, search_regulation, find_boats, book_boat |
+| 단일 `create_agent` + 도구 6개 | recommend_spots, check_condition, search_regulation, find_boats, book_boat, spot_info(포인트 정보) |
 | 하이브리드 RAG | BM25 + Chroma(Titan 임베딩 `amazon.titan-embed-text-v2:0`) |
 | HITL | book_boat interrupt. `EVAL_AUTO_APPROVE=true`면 자동 승인, 기본은 `HITL_PENDING` 응답 |
 | 가드레일 | 입력은 LCEL 분류(정상/범위밖/인젝션)와 불가 강행 결정적 감지, 출력은 규정 안내 문구 자동 부착 |
 | 미들웨어 | ToolCallLimit(전체 8, book_boat 1), 이름·전화 마스킹 |
 | 기억 | SQLite 체크포인터(thread_id, 단기), SQLite Store(user_id, 장기 선호) |
-| 트레이싱 | LANGSMITH_API_KEY가 있으면 LangSmith, 없으면 `traces/*.jsonl` |
+| 트레이싱 | LANGSMITH_API_KEY가 있으면 LangSmith, 없으면 `traces/*.jsonl`. 오류 시 사유 코드와 예외 요약(마스킹)을 남김 |
+| 실시간 외부 데이터 | 기상청 단기예보(풍속·파고)·기상특보(발효 특보+예비특보), 물때는 월령 계산. 답변에 발표 시각 출처 표기 |
+| 대안 추천 | 데이터가 없을 때 도구가 `suggestions`·`alternatives`를 함께 돌려주고 에이전트가 대안을 제안 |
 
 ## 3. 아키텍처
 ```
 POST /query {question, thread_id?, user_id?}
   → 입력 검증(422) → 입력 가드레일(LCEL) → create_agent(Bedrock Claude Haiku 4.5, temperature=0)
-       ├─ recommend_spots / check_condition / find_boats / book_boat (CSV·JSON 데이터)
-       └─ search_regulation → retriever(BM25 + Chroma)
+       ├─ recommend_spots / check_condition / spot_info / find_boats / book_boat
+       │     데이터: data/*.csv·criteria.json, 날씨: src/weather.py (forecast.csv 또는 기상청 API)
+       │     데이터가 없으면 src/suggest.py 가 대안을 붙여 돌려줌
+       └─ search_regulation → retriever(어종 제목 일치 우선 + BM25·Chroma 하이브리드)
   → 출력 가드레일 → 마스킹 → {answer, contexts, trace}
 ```
 전체 처리 120초 초과나 도구·모델 예외는 `ERROR_FIXED`로 응답합니다.
 
+소스 구성(파일 하나에 역할 하나):
+```
+src/agent.py       메인 에이전트 조립(make_llm, build_app) + 실행 진입점(app, __main__)
+src/app.py         요청 처리 파이프라인(FishingApp)        src/server.py   FastAPI POST /query
+src/cli.py         대화형 CLI·데모                          src/prompts.py  시스템 프롬프트
+src/guardrails.py  입력 가드레일                            src/masking.py  개인정보 마스킹
+src/middleware.py  도구 예외 분류·예약 사전검증 미들웨어     src/tracing.py  트레이스 기록
+src/constants.py   고정 문구·경로·날짜                      src/utils.py    공용 도우미
+src/tools.py       에이전트 도구 6개(@tool)                 src/suggest.py  데이터 없을 때 대안 찾기
+src/data.py        CSV·JSON 읽기(매일 운항 배편 포함)        src/verdict.py  날짜 검증·출조 판정
+src/spots.py       포인트명 해석                            src/booking.py  예약 사전검증
+src/preferences.py 장기 기억 선호                           src/weather.py  날씨 소스(csv·기상청)
+src/retriever.py   규정 하이브리드 검색                     src/chunker.py  규정 청크 나누기
+src/vectorstore.py 임베딩·Chroma 생성
+```
+
 ## 4. 실행 방법
 1. `.env.example`을 `.env`로 복사해 값을 채웁니다(AWS 자격증명 포함. 비밀은 코드에 적지 않음).
-2. 서버: `bash run.sh` (pip install → data/chroma 없으면 빌드 → `uvicorn src.agent:app --port 8000`)
-3. 호출: `curl -X POST localhost:8000/query -H "Content-Type: application/json" -d '{"question":"내일 지세포방파제 갈 수 있어?"}'`
-4. 대화형 CLI(질문 입력 → 답변, 예약은 사람 승인): `python -m src.agent` (새 대화 `/new`, 종료 `종료`/`exit`). 고정 예약 데모는 `python -m src.agent --demo`
+2. 서버: `bash run.sh` (pip install → data/chroma 없으면 빌드 → `uvicorn src.agent:app --port 8000`). 규정 문서를 고치면 `data/chroma/`를 지우고 `python -m src.retriever`로 다시 만듭니다.
+3. 호출: `curl -X POST localhost:8000/query -H "Content-Type: application/json" -d '{"question":"내일 지세포방파제 갈 수 있어?"}'` (Windows Git Bash에서는 한글이 깨지므로 질문을 UTF-8 파일에 담아 `--data-binary @q.json`으로 보냅니다. API 문서: http://localhost:8000/docs)
+4. 대화형 CLI(질문 입력 → 답변, 예약은 사람 승인): `python -m src.agent` (새 대화는 `새 대화`, 마칠 때는 `종료` 입력). 고정 예약 데모는 `python -m src.agent --demo`
 5. 평가: `python evaluation/run_eval.py --round 1` 또는 `--round 2` (`evaluation/round<N>_report.md` 생성)
 6. Docker: `docker build -t fishing-agent .` → `docker run --env-file .env -p 8000:8000 fishing-agent`
+7. 실시간 날씨: `.env`에 `WEATHER_SOURCE=kma`, `KMA_SERVICE_KEY=<공공데이터포털 키>`(단기예보·기상특보 조회서비스 활용신청)를 넣고 서버를 재시작합니다. 풍속·파고는 단기예보 06~18시 최댓값(파고가 없으면 주변 격자 탐색, 끝내 없으면 '주의' 이상), 특보는 발효 중 특보(다른 날짜에도 보수적으로 적용)와 해당 날짜 풍랑 예비특보(풍랑주의보로 반영)를 해상구역으로 매칭, 물때는 월령 계산 근사입니다. 실시간 모드의 '오늘'은 서버 시작 시점 기준이라 자정이 지나면 재시작합니다. 평가는 재현성을 위해 `csv`로 돌립니다.
 
 ## 5. RAGAS 결과
 `evaluation/run_eval.py`가 Bedrock(`us.anthropic.claude-haiku-4-5-20251001-v1:0`, Titan v2 임베딩)으로 RAGAS를 계산했습니다. 계산 대상은 contexts가 있는 건만이고, reference는 expected_traits입니다. RAGAS 점수는 보고용이며 통과 판정에는 쓰지 않습니다.
@@ -59,9 +83,11 @@ Sonnet 4.5로 처음 시도했을 때는 Bedrock 일일 토큰 한도(`Throttlin
 
 통과 기준은 expected_tools 호출 AND forbidden 위반 없음 AND LLM Judge가 expected_traits 전부 충족이며, 케이스당 1회 결과만 채점합니다. 1·2차 사이에는 `test_queries.csv`를 수정하지 않고 프롬프트·도구 로직·가드레일만 개선합니다.
 
+> 위 1·2차 결과는 아래 "9. 3차 변경" 이전 코드·데이터 기준입니다. 3차 변경 후에는 전체 평가를 다시 돌리지 않았습니다. 데이터 확장으로 #7·#9(데이터에 없는 대상) 질문을 독도·개복치로 바꿨습니다.
+
 ## 7. 회고
 - 잘된 점: 판정·추천·예약 검증을 LLM이 아닌 결정적 코드로 구현해 재현성이 높고, 마스킹을 answer·contexts·trace에 일관되게 적용했습니다.
-- 어려웠던 점: 한 파일(`src/agent.py`)에 앱·가드레일·미들웨어·트레이싱을 모아야 하는 제출 규약과 Bedrock 호출 한도입니다.
+- 어려웠던 점: 한 파일(`src/agent.py`)에 앱·가드레일·미들웨어·트레이싱을 모아야 하는 제출 규약(3차에서 역할별 모듈로 분리)과 Bedrock 호출 한도입니다.
 - 시도했다가 바꾼 점: Sonnet 4.5는 평가 1회에 드는 토큰이 일일 한도를 넘었다. 그래서 Haiku 4.5로 바꿨다. Haiku는 예약 정보가 다 갖춰져도 다시 묻는 경향이 있어서, "필수 정보 5개가 있으면 바로 book_boat 호출" 규칙을 시스템 프롬프트에 넣었다.
 - 평가 함정: 체크포인터를 SQLite에 영속 저장하는데 thread_id를 고정해 두었더니, 이전 실행의 대화가 다음 평가에 섞였다. 이 상태로 돌린 2차 평가는 11/15였다. 실행마다 ID를 격리하도록 고쳤다.
 - 한계: answer_relevancy가 낮고, 장기 기억은 추천을 요청할 때만 저장된다. 기억한 선호를 답변에서 근거로 밝히는 기능(PRD 요구사항)은 아직 구현하지 않았다.
@@ -69,12 +95,34 @@ Sonnet 4.5로 처음 시도했을 때는 Bedrock 일일 토큰 한도(`Throttlin
 ## 8. 핵심 코드 위치
 | 기능 | 위치 |
 |---|---|
-| 고정 문구 상수 | `src/agent.py` 51~59행 |
-| 마스킹 | `src/agent.py` `mask_text`, `mask_name` |
-| 입력 가드레일 / 불가 강행 감지 | `src/agent.py` `GuardrailClassification`, `build_guard_chain`, `is_unsafe_push` |
-| 트레이싱 | `src/agent.py` `write_trace` |
-| 에이전트 조립 | `src/agent.py` `FishingApp`, `async build_app()` |
-| FastAPI `/query`, CLI 데모·대화형 | `src/agent.py` `query_endpoint`, `_demo`, `_chat` |
-| 판정·추천·예약 도구 | `src/tools.py` `compute_verdict`, `recommend_spots`, `check_condition`, `book_boat` |
-| 하이브리드 검색·Chroma 빌드 | `src/retriever.py` `search`, `build_chroma` |
+| 고정 문구 상수·경로 | `src/constants.py` (`src.agent` 에서도 같은 이름으로 참조 가능) |
+| 마스킹 | `src/masking.py` `mask_text`, `mask_name` |
+| 입력 가드레일 / 불가 강행 감지 | `src/guardrails.py` `GuardrailClassification`, `build_guard_chain`, `is_unsafe_push` |
+| 시스템 프롬프트 | `src/prompts.py` `system_prompt` |
+| 트레이싱 | `src/tracing.py` `write_trace` |
+| 미들웨어·오류 사유 코드 | `src/middleware.py` `ToolFaultMiddleware`, `BookingPrecheckMiddleware`, `error_code` |
+| 요청 처리 파이프라인 | `src/app.py` `FishingApp` |
+| 에이전트 조립 | `src/agent.py` `make_llm`, `async build_app()` |
+| FastAPI `/query` | `src/server.py` `create_api`, `QueryRequest` (`src.agent:app` 으로 실행) |
+| CLI 대화형·데모 | `src/cli.py` `_chat`, `_demo` (`python -m src.agent` 로 실행) |
+| 도구 정의 | `src/tools.py` `recommend_spots`, `check_condition`, `spot_info`, `search_regulation`, `find_boats`, `book_boat` |
+| 데이터가 없을 때 대안 | `src/suggest.py` `spot_alternatives`, `relaxed_recommendations`, `boat_alternatives`, `regulation_gap` |
+| 데이터 로딩(매일 운항 배편) / 판정 / 포인트 해석 / 선호 / 예약 검증 | `src/data.py` `boats_on`, `src/verdict.py`, `src/spots.py`, `src/preferences.py`, `src/booking.py` |
+| 날씨 소스(csv·기상청, 포인트 좌표 `SPOT_GEO`) | `src/weather.py` `get_forecast` |
+| 하이브리드 검색(어종 제목 우선) / 청크 / Chroma 빌드 | `src/retriever.py` `search`, `species_chunks`, `src/chunker.py` `load_chunks`, `src/vectorstore.py` `build_chroma` |
+| 공용 도우미 | `src/utils.py` `get_text`, `env_true` |
 | 평가·Judge·RAGAS | `evaluation/run_eval.py` |
+
+## 9. 3차 변경 (1·2차 평가 이후)
+| 영역 | 변경 |
+|---|---|
+| 모델 | `us.anthropic.claude-haiku-4-5-20251001-v1:0` (`.env`의 `BEDROCK_MODEL_ID`) |
+| 실시간 날씨 | `src/weather.py` 신설, `WEATHER_SOURCE`(`csv`/`kma`) 전환. 기상청 단기예보·특보·예비특보, 월령 물때, 발표 시각 출처 표기 |
+| 구조 | `agent.py`·`tools.py`·`retriever.py`를 역할별 모듈로 분리(진입점과 import 경로는 그대로 유지) |
+| CLI | `python -m src.agent`가 대화형 모드(`새 대화`/`종료`), 고정 데모는 `--demo` |
+| 데이터 | 포인트 29→62곳, 선박 10→33척(`매일` 운항), 규정 어종 확장. 원본 파일에 직접 추가(Seed 불변 조건과 다름) |
+| 대안 추천 | 데이터가 없을 때 비슷한·가까운 포인트, 조건 완화 추천, 다른 날짜·권역 배편, 규정에 있는 어종 제안 |
+| 도구 | `spot_info`(포인트 정보) 추가로 6개 |
+| 안정성 | 규정 검색 병렬 호출 시 Chroma 초기화 충돌 수정(잠금), 어종 제목 일치 청크 우선 검색, 오류 트레이스에 예외 요약 기록 |
+| 평가셋 | #7·#9 질문을 데이터에 없는 대상(독도·개복치)으로 교체 |
+| 의존성 | `requirements.txt`에 `httpx`·`aiosqlite`·`pydantic`·`langgraph` 명시 |

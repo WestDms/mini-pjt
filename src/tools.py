@@ -1,163 +1,26 @@
-"""tools.py - 출조 Agent 도메인 도구 5개
+"""tools.py - 출조 Agent 도메인 도구 6개(에이전트에 노출하는 @tool 정의만 둔다)
 
-recommend_spots, check_condition, search_regulation, find_boats, book_boat.
+recommend_spots, check_condition, search_regulation, find_boats, book_boat, spot_info.
+데이터 읽기는 data, 판정은 verdict, 포인트 해석은 spots, 선호는 preferences, 예약 검증은 booking,
+데이터가 없을 때 대안 찾기는 suggest 가 맡는다.
 데이터(data/*.csv, criteria.json)는 읽기만 하고 수정하지 않는다.
 """
-import csv
+import asyncio
 import json
-import re
 import uuid
-from functools import lru_cache
-from pathlib import Path
 
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 
-ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "data"
-LEVEL_RANK = {"가능": 0, "주의": 1, "불가": 2}
-LEVELS = ["가능", "주의", "불가"]
-
-
-def _const(name: str) -> str:
-    """agent.py 의 고정 문구 상수를 지연 import 로 가져온다(순환 import 방지)."""
-    from src import agent
-    return getattr(agent, name)
-
-
-@lru_cache(maxsize=1)
-def load_spots() -> list[dict]:
-    """spots.csv 를 읽어 types 와 species_season 을 구조화해 돌려준다."""
-    rows = list(csv.DictReader(open(DATA / "spots.csv", encoding="utf-8-sig")))
-    for r in rows:
-        r["types"] = r["types"].split(";")
-        season = {}
-        for item in r["species_season"].split(";"):
-            sp, rng = item.split(":")
-            s, e = rng.split("-")
-            season[sp] = (int(s), int(e))
-        r["season"] = season
-    return rows
-
-
-@lru_cache(maxsize=1)
-def load_forecast() -> dict:
-    """forecast.csv 를 {(spot_id, date): 행} 으로 읽는다."""
-    rows = csv.DictReader(open(DATA / "forecast.csv", encoding="utf-8-sig"))
-    return {(r["spot_id"], r["date"]): r for r in rows}
-
-
-@lru_cache(maxsize=1)
-def load_boats() -> list[dict]:
-    """boats.csv 를 읽는다."""
-    return list(csv.DictReader(open(DATA / "boats.csv", encoding="utf-8-sig")))
-
-
-@lru_cache(maxsize=1)
-def load_criteria() -> dict:
-    """criteria.json 을 읽는다."""
-    return json.load(open(DATA / "criteria.json", encoding="utf-8"))
-
-
-def valid_date(date: str | None) -> str | None:
-    """날짜 문자열을 검증한다. 비어 있으면 D0(TODAY), 지원 범위 밖이면 None."""
-    crit = load_criteria()
-    if not date:
-        return crit["today"]
-    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", str(date))
-    d = m.group(0) if m else str(date).strip()
-    return d if d in crit["supported_dates"] else None
-
-
-def compute_verdict(spot: dict, date: str, ftype: str) -> dict:
-    """(포인트, 날짜, 낚시형태)의 판정을 criteria.json 으로 결정적으로 계산한다."""
-    crit = load_criteria()
-    f = load_forecast().get((spot["spot_id"], date))
-    if f is None:
-        return {"verdict": "불가", "reason": "예보 데이터 없음"}
-    wind, wave = float(f["wind_ms"]), float(f["wave_m"])
-    th = crit["thresholds"][ftype]
-    if wind <= th["가능"]["wind_max"] and wave <= th["가능"]["wave_max"]:
-        level = "가능"
-    elif wind <= th["주의"]["wind_max"] and wave <= th["주의"]["wave_max"]:
-        level = "주의"
-    else:
-        level = "불가"
-    notes = []
-    adv = crit["advisory_rules"].get(f["advisory"], {}).get(ftype)
-    if adv and LEVEL_RANK[adv] > LEVEL_RANK[level]:
-        level = adv
-        notes.append(f"{f['advisory']} 적용")
-    rule = crit["tide_rules"].get(f["tide"], {})
-    if rule and ftype in rule.get("apply_to", []):
-        down = rule["downgrade"].get(level)
-        if down:
-            level = down
-            notes.append("사리 물때로 한 단계 하향")
-    return {"verdict": level, "wind_ms": wind, "wave_m": wave, "advisory": f["advisory"],
-            "tide": f["tide"], "notes": notes}
-
-
-def find_spot_candidates(name: str) -> list[dict]:
-    """포인트명(부분 일치 포함)으로 후보를 찾는다. 정확히 일치하면 그 한 곳만 돌려준다."""
-    q = re.sub(r"\s+", "", name or "")
-    spots = load_spots()
-    for s in spots:
-        if q and (q == s["name"] or q == s["spot_id"]):
-            return [s]
-    cands = [s for s in spots if q and (s["name"] in q or q in s["name"])]
-    if not cands:
-        toks = [t for t in re.split(r"\s+", (name or "").strip()) if t]
-        cands = [s for s in spots if toks and all(t in s["name"] + s["area"] for t in toks)]
-    if not cands:  # '오천항 선상'처럼 이름 + 형태 단어가 붙은 경우 앞부분만 비교
-        cands = [s for s in spots if len(s["name"]) >= 2 and s["name"][:3] in q]
-    return cands
-
-
-def resolve_spot(query: str) -> dict:
-    """자유 텍스트 포인트명을 해석한다. ①Spot.name 일치 ②Boat.port 일치 ③Spot.area 일치 순.
-    후보 1곳이면 resolved, 2곳 이상이면 ambiguous(최대 3곳, spot_id 순), 0곳이면 not_found."""
-    q = re.sub(r"\s+", "", query or "")
-    spots = sorted(load_spots(), key=lambda s: s["spot_id"])
-    if not q:
-        return {"query": query, "matched_by": None, "candidates": [], "status": "not_found"}
-    stripped = q
-    for w in ("낚시", "선상", "갯바위", "방파제", "좌대"):
-        stripped = stripped.replace(w, "")
-    def by_name(x):
-        exact = [s for s in spots if x in (s["name"], s["spot_id"])]
-        if exact:
-            return exact
-        return [s for s in spots if x and (s["name"] in x or x in s["name"])]
-    def by_port(x):
-        ids = {b["spot_id"] for b in load_boats() if x and (b["port"] in x or x in b["port"])}
-        return [s for s in spots if s["spot_id"] in ids]
-    def by_area(x):
-        return [s for s in spots if x and len(x) >= 2 and (x in s["area"].replace(" ", "")
-                                                           or s["area"].replace(" ", "") in x)]
-    for how, fn in (("name", by_name), ("port", by_port), ("area", by_area)):
-        c = fn(q) or (fn(stripped) if stripped and stripped != q else [])
-        if c:
-            ids = [s["spot_id"] for s in c][:3]
-            return {"query": query, "matched_by": how, "candidates": ids,
-                    "candidate_names": [s["name"] for s in c][:3],
-                    "status": "resolved" if len(c) == 1 else "ambiguous"}
-    return {"query": query, "matched_by": None, "candidates": [], "status": "not_found"}
-
-
-def _store_pref(runtime: ToolRuntime) -> tuple:
-    """runtime 에서 Store 와 user_id 를 꺼낸다."""
-    cfg = (runtime.config or {}).get("configurable", {}) if runtime else {}
-    return getattr(runtime, "store", None), cfg.get("user_id")
-
-
-async def _load_pref(runtime: ToolRuntime) -> dict:
-    """Store(user_id)에서 선호(어종·권역·형태)를 읽는다."""
-    store, uid = _store_pref(runtime)
-    if store is None or not uid:
-        return {}
-    item = await store.aget(("users", uid), "preference")
-    return dict(item.value) if item else {}
+from src.booking import precheck_booking
+from src.constants import DATE_OUT_OF_RANGE, SPOT_NOT_FOUND
+from src.data import LEVEL_RANK, boats_on, load_boats, load_spots
+from src.preferences import load_pref, store_pref
+from src.spots import find_spot_candidates, resolve_spot
+from src.suggest import (boat_alternatives, in_season, regulation_gap, relaxed_recommendations,
+                         spot_alternatives)
+from src.verdict import compute_verdict, valid_date
+from src.weather import prefetch
 
 
 @tool
@@ -169,12 +32,12 @@ async def recommend_spots(runtime: ToolRuntime, date: str = "", species: str = "
     받은 어종·권역·형태는 사용자 선호로 저장하고, 빠진 값은 저장된 선호로 채운다."""
     d = valid_date(date)
     if d is None:
-        return _const("DATE_OUT_OF_RANGE")
-    pref = await _load_pref(runtime)
+        return DATE_OUT_OF_RANGE
+    pref = await load_pref(runtime)
     species = species or pref.get("species", "")
     region = region or pref.get("region", "")
     ftype = fishing_type or pref.get("fishing_type", "")
-    store, uid = _store_pref(runtime)
+    store, uid = store_pref(runtime)
     if store is not None and uid:
         new = {"species": species or None, "region": region or None, "fishing_type": ftype or None}
         # 이번 요청에서 받은 인자를 덮어쓰고, 비어 있는 항목은 기존 값을 유지한다
@@ -182,6 +45,9 @@ async def recommend_spots(runtime: ToolRuntime, date: str = "", species: str = "
         await store.aput(("users", uid), "preference", merged)
     month = int(d[5:7])
     results = []
+    # 실시간 모드에서는 후보 포인트 예보를 병렬로 미리 받아 둔다(csv 모드는 아무것도 하지 않음)
+    await asyncio.to_thread(prefetch, [s for s in load_spots() if (not region or s["region"] == region)
+                                       and (not ftype or ftype in s["types"])], d)
     for s in load_spots():
         if region and s["region"] != region:
             continue
@@ -201,8 +67,14 @@ async def recommend_spots(runtime: ToolRuntime, date: str = "", species: str = "
         results.append({"spot_id": s["spot_id"], "name": s["name"], "region": s["region"],
                         "area": s["area"], "fishing_type": t, **v})
     results.sort(key=lambda r: (LEVEL_RANK[r["verdict"]], r["spot_id"]))
-    return json.dumps({"date": d, "filters": {"species": species, "region": region, "fishing_type": ftype},
-                       "recommendations": results[:3], "total_matched": len(results)}, ensure_ascii=False)
+    out = {"date": d, "filters": {"species": species, "region": region, "fishing_type": ftype},
+           "recommendations": results[:3], "total_matched": len(results)}
+    if not results:  # 조건에 맞는 곳이 없으면 조건을 하나씩 풀어 데이터에 있는 대안을 찾는다
+        alt = await asyncio.to_thread(relaxed_recommendations, d, species, region, ftype)
+        if alt:
+            out["alternatives"] = alt
+            out["instruction"] = "요청 조건에 맞는 곳이 없다고 먼저 말하고, alternatives.relaxed 사유와 함께 대안을 추천하라."
+    return json.dumps(out, ensure_ascii=False)
 
 
 @tool
@@ -213,10 +85,14 @@ async def check_condition(runtime: ToolRuntime, spot_name: str, date: str = "",
     (없으면 저장된 선호 → 포인트 기본 형태 순). 모호한 포인트명은 후보를 돌려준다."""
     d = valid_date(date)
     if d is None:
-        return _const("DATE_OUT_OF_RANGE")
+        return DATE_OUT_OF_RANGE
     res = resolve_spot(spot_name)
     if res["status"] == "not_found":
-        return _const("SPOT_NOT_FOUND")
+        alt = await asyncio.to_thread(spot_alternatives, spot_name, d)
+        return json.dumps({"status": "not_found", "query": spot_name, "message": SPOT_NOT_FOUND, **alt,
+                           "instruction": "message 를 그대로 전한 뒤 suggestions 를 대안 포인트로 제안하라. "
+                                          "없는 포인트의 판정·수치는 말하지 말고, 대안의 판정은 사용자가 원할 때 확인한다."},
+                          ensure_ascii=False)
     if res["status"] == "ambiguous":
         return json.dumps({"status": "ambiguous", "query": spot_name, "matched_by": res["matched_by"],
                            "candidates": res["candidates"], "candidate_names": res["candidate_names"],
@@ -232,7 +108,7 @@ async def check_condition(runtime: ToolRuntime, spot_name: str, date: str = "",
                               ensure_ascii=False)
         ftype = fishing_type
     else:
-        pref = await _load_pref(runtime)
+        pref = await load_pref(runtime)
         if pref.get("fishing_type") in s["types"]:
             ftype, type_source = pref["fishing_type"], "Store"
         else:
@@ -250,63 +126,46 @@ def search_regulation(query: str) -> tuple[str, list[dict]]:
     from src import retriever
     chunks = retriever.search(query, k=3)
     text = "\n\n".join(f"[{c['doc_id']}]\n{c['text']}" for c in chunks)
+    gap = regulation_gap(query)  # 문서에 없는 어종이면 문서에 있는 어종 목록을 덧붙인다
+    if gap:
+        text = f"{text}\n\n{gap}" if text else gap
     return text or "관련 규정을 찾지 못했습니다.", chunks
 
 
 @tool
 def find_boats(date: str = "", spot_name: str = "", species: str = "") -> str:
-    """선상 배편을 찾는다. date는 YYYY-MM-DD(없으면 오늘), spot_name·species로 좁힐 수 있다.
+    """선상 배편을 찾는다. date는 YYYY-MM-DD(없으면 오늘), spot_name(포인트·항구)·species(어종 이름, 예: 감성돔)로 좁힐 수 있다.
     배ID, 선박명, 항구, 어종, 남은 자리, 가격을 돌려준다."""
     d = valid_date(date)
     if d is None:
-        return _const("DATE_OUT_OF_RANGE")
+        return DATE_OUT_OF_RANGE
+    if species.strip() in ("선상", "방파제", "갯바위", "좌대", "낚시", "선상낚시"):
+        species = ""  # 어종이 아니라 낚시 형태가 들어오면 무시한다(배편은 모두 선상)
     spot_ids = None
     if spot_name:
         c = find_spot_candidates(spot_name)
         if not c:
-            return _const("SPOT_NOT_FOUND")
+            return json.dumps({"status": "not_found", "query": spot_name, "message": SPOT_NOT_FOUND,
+                               **spot_alternatives(spot_name, d),
+                               "instruction": "message 를 그대로 전한 뒤 suggestions 포인트의 배편을 찾아볼지 제안하라."},
+                              ensure_ascii=False)
         spot_ids = {x["spot_id"] for x in c}
     out = []
-    for b in load_boats():
-        if b["date"] != d:
-            continue
+    for b in boats_on(d):
         if spot_ids and b["spot_id"] not in spot_ids:
             continue
         if species and species not in b["species"]:
             continue
         out.append({k: b[k] for k in ("boat_id", "boat_name", "port", "spot_id", "date", "species",
                                       "capacity", "seats_left", "price")})
-    return json.dumps({"date": d, "boats": out}, ensure_ascii=False)
+    res = {"date": d, "boats": out}
+    if not out:  # 배편이 없으면 같은 포인트 다른 날짜·같은 권역 배편을 대안으로 준다
+        alts = boat_alternatives(d, spot_ids, species)
+        if alts:
+            res["alternatives"] = alts
+            res["instruction"] = "요청한 조건의 배편은 없다고 먼저 말하고, alternatives 를 why 와 함께 대안으로 추천하라."
+    return json.dumps(res, ensure_ascii=False)
 
-
-def precheck_booking(boat_id: str, date: str, people, name: str = "x", phone: str = "x") -> dict:
-    """예약 사전검증(결정적). HITL 승인보다 먼저 호출한다.
-    status: ok | missing_fields | date_out_of_range | boat_not_found | seats_insufficient | verdict_impossible"""
-    if not (str(boat_id or "").strip() and str(date or "").strip() and people not in (None, "")
-            and str(name or "").strip() and str(phone or "").strip()):
-        return {"status": "missing_fields", "reason": "배ID·날짜·인원·이름·전화번호가 모두 필요합니다."}
-    d = valid_date(date)
-    if d is None:
-        return {"status": "date_out_of_range", "reason": _const("DATE_OUT_OF_RANGE")}
-    boat = next((b for b in load_boats() if b["boat_id"] == str(boat_id).strip().upper() and b["date"] == d), None)
-    if boat is None:
-        return {"status": "boat_not_found", "reason": f"해당 날짜에 {boat_id} 배편이 없어 예약할 수 없습니다."}
-    try:
-        n = int(people)
-    except (TypeError, ValueError):
-        return {"status": "missing_fields", "reason": "인원은 숫자여야 합니다."}
-    if n < 1:
-        return {"status": "missing_fields", "reason": "인원은 1명 이상이어야 합니다."}
-    seats = int(boat["seats_left"])
-    if n > seats:
-        return {"status": "seats_insufficient",
-                "reason": f"남은 자리({seats}석)보다 인원({n}명)이 많아 예약할 수 없습니다. 인원을 조정해 주세요."}
-    spot = next(s for s in load_spots() if s["spot_id"] == boat["spot_id"])
-    v = compute_verdict(spot, d, "선상")
-    if v["verdict"] == "불가":
-        return {"status": "verdict_impossible",
-                "reason": f"{d} {spot['name']} 선상 판정이 '불가'라 예약할 수 없습니다."}
-    return {"status": "ok", "reason": "", "boat": boat, "date": d, "people": n, "verdict": v["verdict"]}
 
 
 @tool
@@ -323,4 +182,34 @@ def book_boat(boat_id: str, date: str, people: int, name: str, phone: str) -> st
                        "verdict": pc["verdict"]}, ensure_ascii=False)
 
 
-ALL_TOOLS = [recommend_spots, check_condition, search_regulation, find_boats, book_boat]
+@tool
+def spot_info(spot_name: str) -> str:
+    """포인트(출조지) 정보를 조회한다. 지역·권역, 가능한 낚시 형태, 대상어종과 어종별 시즌(이번 달 시즌 여부),
+    그 포인트로 가는 선상 배편(배ID·선박명·항구)을 돌려준다. '○○ 대상어종', '○○ 어떤 곳이야' 같은 질문에 쓴다.
+    출조 가능 판정(날씨)은 check_condition, 규정(금어기·체장)은 search_regulation 을 쓴다."""
+    res = resolve_spot(spot_name)
+    if res["status"] == "not_found":
+        return json.dumps({"status": "not_found", "query": spot_name, "message": SPOT_NOT_FOUND,
+                           **spot_alternatives(spot_name, valid_date("")),
+                           "instruction": "message 를 그대로 전한 뒤 suggestions 를 대안 포인트로 제안하라."},
+                          ensure_ascii=False)
+    if res["status"] == "ambiguous":
+        return json.dumps({"status": "ambiguous", "query": spot_name, "candidate_names": res["candidate_names"],
+                           "instruction": "어느 포인트인지 사용자에게 후보 중에서 되물어라."}, ensure_ascii=False)
+    s = next(x for x in load_spots() if x["spot_id"] == res["candidates"][0])
+    month = int(valid_date("")[5:7])
+    species = [{"species": sp, "season": f"{a}월~{b}월", "in_season_now": in_season(s, sp, month)}
+               for sp, (a, b) in s["season"].items()]
+    boats = {}
+    for b in load_boats():  # 같은 배가 날짜별로 여러 행이어도 한 번만 보여준다
+        if b["spot_id"] == s["spot_id"] and b["boat_id"] not in boats:
+            boats[b["boat_id"]] = {"boat_id": b["boat_id"], "boat_name": b["boat_name"], "port": b["port"],
+                                   "species": b["species"].replace(";", ", "), "price": b["price"]}
+    return json.dumps({"status": "ok", "spot_id": s["spot_id"], "name": s["name"], "region": s["region"],
+                       "area": s["area"], "fishing_types": s["types"], "default_type": s["default_type"],
+                       "species": species, "boats": list(boats.values()),
+                       "note": "날짜별 남은 자리는 find_boats, 출조 가능 여부는 check_condition 으로 확인한다."},
+                      ensure_ascii=False)
+
+
+ALL_TOOLS = [recommend_spots, check_condition, search_regulation, find_boats, book_boat, spot_info]

@@ -29,3 +29,10 @@ fastapi
 uvicorn
 ragas
 langsmith
+
+# 코드에서 직접 import 하는 패키지(다른 패키지 의존성으로 설치되지만 명시)
+langgraph
+aiosqlite
+pydantic>=2
+# 3차: 기상청 실시간 API 호출(src/weather.py)
+httpx
