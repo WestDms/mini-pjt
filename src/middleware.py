@@ -1,14 +1,17 @@
-"""middleware.py - 에이전트 미들웨어(도구 예외 분류, 도구 인자 검증, 예약 사전검증)와 오류 사유 코드"""
+"""middleware.py - 에이전트 미들웨어(도구 예외 분류, 도구 인자 검증, 모호 포인트 되묻기, 예약 사전검증)와 오류 사유 코드"""
 import asyncio
+import json
 import logging
+import re
 
 from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.errors import GraphBubbleUp
 
 from src.booking import precheck_booking
 from src.guardrails import validate_tool_args
+from src.spots import resolve_spot
 
 logger = logging.getLogger("fishing_agent")
 ARG_REJECTED = "요청 값이 올바르지 않아 실행하지 않았습니다({reason}). 값을 바로잡아 다시 요청해 달라고 안내하라."
@@ -59,6 +62,60 @@ class ToolArgGuardMiddleware(AgentMiddleware):
 
     async def awrap_tool_call(self, request, handler):
         """비동기 도구 호출 전에 인자를 검사한다."""
+        return self._reject(request) or await handler(request)
+
+
+ALL_SPOTS_RE = re.compile(r"모두|전부|전체|각각|비교|다\s*(알려|봐|확인|비교)")
+
+
+def unchosen_candidate(question: str, spot_name: str) -> dict | None:
+    """질문이 지역(도·시군구)이라 포인트가 여럿인데, 사용자가 말하지 않은 포인트를 판정하려 하면 후보 정보를 돌려준다.
+    사용자가 그 포인트를 직접 말했거나 '모두·비교'를 원하면 None(그대로 실행)."""
+    q = question or ""
+    res = resolve_spot(spot_name)
+    if res["status"] != "resolved" or ALL_SPOTS_RE.search(q):
+        return None
+    name = res["candidate_names"][0]
+    if name in q:
+        return None
+    asked = resolve_spot(q)
+    if asked["status"] != "ambiguous":
+        return None
+    return {"status": "ambiguous", "query": q, "candidate_names": asked["candidate_names"],
+            "instruction": "사용자가 포인트를 정하지 않았다. 판정하지 말고 candidate_names 를 보여 주며 어느 포인트인지 되물어라."}
+
+
+def _user_question(messages) -> str:
+    """마지막 사용자 메시지에서 질문을 꺼낸다(출력 가드레일 재시도 메시지면 '원래 질문' 부분)."""
+    for m in reversed(messages or []):
+        if isinstance(m, HumanMessage):
+            text = m.content if isinstance(m.content, str) else str(m.content)
+            return text.split("원래 질문:", 1)[-1].strip()
+    return ""
+
+
+class AmbiguousSpotMiddleware(AgentMiddleware):
+    """모호한 포인트 되묻기 보장 미들웨어. '거제 갯바위'처럼 지역으로 물었는데 사용자가 고르지 않은 후보를
+    check_condition 으로 판정하려 하면 실행하지 않고 후보와 되묻기 지시를 돌려준다."""
+
+    def _reject(self, request):
+        """고르지 않은 후보 판정이면 ambiguous ToolMessage, 아니면 None."""
+        call = request.tool_call
+        if call["name"] != "check_condition":
+            return None
+        q = _user_question((request.state or {}).get("messages"))
+        out = unchosen_candidate(q, (call.get("args") or {}).get("spot_name", ""))
+        if out is None:
+            return None
+        logger.info("unchosen candidate blocked: %s", (call.get("args") or {}).get("spot_name"))
+        return ToolMessage(content=json.dumps(out, ensure_ascii=False), name=call["name"], tool_call_id=call["id"])
+
+    def wrap_tool_call(self, request, handler):
+        """동기 도구 호출 전에 검사한다."""
+        return self._reject(request) or handler(request)
+
+    async def awrap_tool_call(self, request, handler):
+        """비동기 도구 호출 전에 검사한다."""
         return self._reject(request) or await handler(request)
 
 

@@ -25,7 +25,8 @@ from src.constants import *  # noqa: F401,F403  고정 문구를 agent.X 로도 
 from src.constants import STATE_DB
 from src.guardrails import build_guard_chain
 from src.masking import mask_text
-from src.middleware import BookingPrecheckMiddleware, ToolArgGuardMiddleware, ToolFaultMiddleware
+from src.middleware import (AmbiguousSpotMiddleware, BookingPrecheckMiddleware, ToolArgGuardMiddleware,
+                            ToolFaultMiddleware)
 from src.prompts import dynamic_system_prompt
 from src.server import create_api
 from src.tools import ALL_TOOLS
@@ -70,6 +71,7 @@ async def build_app() -> FishingApp:
             dynamic_system_prompt,  # 모델 호출마다 오늘 날짜·요일을 다시 계산한 시스템 프롬프트
             ToolFaultMiddleware(),
             ToolArgGuardMiddleware(),  # 도구 인자 형식·길이·공격 패턴 검사(위반 시 실행 안 함)
+            AmbiguousSpotMiddleware(),  # 지역으로 물었는데 사용자가 고르지 않은 후보 판정은 실행하지 않고 되묻게 함
             ToolCallLimitMiddleware(run_limit=8, exit_behavior="error"),
             ToolCallLimitMiddleware(tool_name="book_boat", run_limit=1, exit_behavior="error"),
             HumanInTheLoopMiddleware(interrupt_on={"book_boat": True}),

@@ -100,3 +100,18 @@ def test_api_rejects_bad_ids_and_extra_fields():
     for bad in [{"user_id": "admin' OR '1'='1"}, {"thread_id": "../x"}, {"is_admin": True}]:
         with pytest.raises(ValidationError):
             QueryRequest(question="내일 낚시", **bad)
+
+
+def test_unchosen_candidate_blocked():
+    """지역으로 물었는데 사용자가 고르지 않은 후보를 판정하려 하면 막고, 직접 말했거나 '비교'를 원하면 허용한다."""
+    from src.middleware import _user_question, unchosen_candidate
+    from langchain_core.messages import HumanMessage
+    out = unchosen_candidate("거제 갯바위 내일 출조 돼?", "학동갯바위")
+    assert out and out["status"] == "ambiguous" and "여차갯바위" in out["candidate_names"]
+    assert unchosen_candidate("거제 갯바위 내일 출조 돼?", "거제 갯바위") is None  # 도구가 직접 ambiguous 처리
+    assert unchosen_candidate("학동갯바위 내일 출조 돼?", "학동갯바위") is None
+    assert unchosen_candidate("학동 갯바위 내일 돼?", "학동갯바위") is None
+    assert unchosen_candidate("거제 갯바위 내일 모두 비교해줘", "학동갯바위") is None
+    assert unchosen_candidate("두 번째 거", "여차갯바위") is None  # 앞 턴 되묻기에 대한 답
+    retry = HumanMessage("[자동 확인] 도구로 확인하세요. 원래 질문: 거제 갯바위 내일 출조 돼?")
+    assert _user_question([HumanMessage("이전"), retry]) == "거제 갯바위 내일 출조 돼?"
